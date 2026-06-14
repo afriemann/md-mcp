@@ -27,7 +27,7 @@ def _check_path(file_path: str) -> Path:
     path.  Otherwise raises ``PermissionError`` when the resolved path is not
     relative to at least one allowed root.
     """
-    resolved = Path(file_path).resolve()
+    resolved = Path(file_path).expanduser().resolve()
     if _allowed_roots is not None:
         if not any(resolved.is_relative_to(root) for root in _allowed_roots):
             raise PermissionError(f"path not under any allowed root: {file_path}")
@@ -240,6 +240,6 @@ def main() -> None:
         )
         _allowed_roots = None
     else:
-        _allowed_roots = [Path(p).resolve() for p in args.allow_roots]
+        _allowed_roots = [Path(p).expanduser().resolve() for p in args.allow_roots]
 
     mcp.run(transport="stdio")
