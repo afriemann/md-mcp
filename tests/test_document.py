@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -111,7 +112,7 @@ class TestGetSection:
         )
         p = write_md(tmp_path, content)
         doc = MarkdownDocument(p)
-        text = doc.get_section("Root.Section A", include_children=True)
+        text = doc.get_section("Root.Section A", depth=None)
         assert "## Section A" in text
         assert "Body A" in text
         assert "### Sub A1" in text
@@ -129,10 +130,10 @@ class TestGetSection:
         )
         p = write_md(tmp_path, content)
         doc = MarkdownDocument(p)
-        text = doc.get_section("Root.Section A", include_children=False)
+        text = doc.get_section("Root.Section A", depth=0)
         assert "## Section A" in text
         assert "Body A" in text
-        # With include_children=False, stop at any next heading
+        # With depth=0, stop at any next heading
         assert "### Sub A1" not in text
 
     def test_section_with_no_body(self, tmp_path: Path) -> None:
@@ -516,11 +517,11 @@ class TestEdgeCases:
         assert index["sections"][0]["children"][0]["heading"] == "Section"
 
     def test_get_section_h1_with_children(self, tmp_path: Path) -> None:
-        """get_section on H1 with include_children=True returns full document."""
+        """get_section on H1 with depth=None returns full document."""
         content = "# Root\n\nIntro\n\n## A\n\nBody A\n"
         p = write_md(tmp_path, content)
         doc = MarkdownDocument(p)
-        text = doc.get_section("Root", include_children=True)
+        text = doc.get_section("Root", depth=None)
         assert "# Root" in text
         assert "Intro" in text
         assert "## A" in text
@@ -654,3 +655,224 @@ class TestDeleteSectionBlankLineCleanup:
         # Deleted section gone
         assert "## Middle" not in text
         assert "Middle body" not in text
+
+
+# ---------------------------------------------------------------------------
+# 11. get_section depth parameter
+# ---------------------------------------------------------------------------
+
+# Shared fixture content for depth tests
+_DEPTH_MD = (
+    "# Root\n\n"
+    "Root body.\n\n"
+    "## Child A\n\n"
+    "Child A body.\n\n"
+    "### Grandchild A1\n\n"
+    "Grandchild A1 body.\n\n"
+    "### Grandchild A2\n\n"
+    "Grandchild A2 body.\n\n"
+    "## Child B\n\n"
+    "Child B body.\n"
+)
+
+
+class TestGetSectionDepth:
+    def test_depth_none_returns_full_subtree(self, tmp_path: Path) -> None:
+        """depth=None (default) returns heading + body + all descendants."""
+        p = write_md(tmp_path, _DEPTH_MD)
+        doc = MarkdownDocument(p)
+        text = doc.get_section("Root.Child A")  # default depth=None
+        assert "## Child A" in text
+        assert "Child A body." in text
+        assert "### Grandchild A1" in text
+        assert "Grandchild A1 body." in text
+        assert "### Grandchild A2" in text
+        assert "Grandchild A2 body." in text
+        # Must not include Child B
+        assert "## Child B" not in text
+        assert "Child B body." not in text
+
+    def test_depth_zero_returns_heading_and_own_body_only(self, tmp_path: Path) -> None:
+        """depth=0 returns heading + own body, no child sections."""
+        p = write_md(tmp_path, _DEPTH_MD)
+        doc = MarkdownDocument(p)
+        text = doc.get_section("Root.Child A", depth=0)
+        assert "## Child A" in text
+        assert "Child A body." in text
+        assert "### Grandchild A1" not in text
+        assert "Grandchild A1 body." not in text
+        assert "### Grandchild A2" not in text
+
+    def test_depth_one_includes_immediate_children_only(self, tmp_path: Path) -> None:
+        """depth=1 returns heading + body + immediate children, not grandchildren."""
+        p = write_md(tmp_path, _DEPTH_MD)
+        doc = MarkdownDocument(p)
+        # Request Child A with depth=1 — should include Grandchild A1 & A2
+        # (they are immediate children of Child A)
+        text = doc.get_section("Root.Child A", depth=1)
+        assert "## Child A" in text
+        assert "Child A body." in text
+        assert "### Grandchild A1" in text
+        assert "Grandchild A1 body." in text
+        assert "### Grandchild A2" in text
+        assert "Grandchild A2 body." in text
+        # Child B is a sibling (same level), not a child — must NOT appear
+        assert "## Child B" not in text
+
+    def test_depth_one_from_root_includes_children_not_grandchildren(
+        self, tmp_path: Path
+    ) -> None:
+        """depth=1 from Root returns Child A + Child B but NOT grandchildren."""
+        p = write_md(tmp_path, _DEPTH_MD)
+        doc = MarkdownDocument(p)
+        text = doc.get_section("Root", depth=1)
+        assert "# Root" in text
+        assert "Root body." in text
+        assert "## Child A" in text
+        assert "Child A body." in text
+        assert "## Child B" in text
+        assert "Child B body." in text
+        # Grandchildren must NOT appear
+        assert "### Grandchild A1" not in text
+        assert "Grandchild A1 body." not in text
+        assert "### Grandchild A2" not in text
+
+    def test_depth_two_includes_children_and_grandchildren(
+        self, tmp_path: Path
+    ) -> None:
+        """depth=2 from Root returns children + grandchildren."""
+        p = write_md(tmp_path, _DEPTH_MD)
+        doc = MarkdownDocument(p)
+        text = doc.get_section("Root", depth=2)
+        assert "# Root" in text
+        assert "## Child A" in text
+        assert "### Grandchild A1" in text
+        assert "Grandchild A1 body." in text
+        assert "### Grandchild A2" in text
+        assert "## Child B" in text
+
+    def test_depth_zero_on_leaf_same_as_depth_none(self, tmp_path: Path) -> None:
+        """depth=0 on a leaf section (no children) returns same as depth=None."""
+        p = write_md(tmp_path, _DEPTH_MD)
+        doc = MarkdownDocument(p)
+        text_zero = doc.get_section("Root.Child A.Grandchild A1", depth=0)
+        text_none = doc.get_section("Root.Child A.Grandchild A1", depth=None)
+        assert text_zero == text_none
+        assert "### Grandchild A1" in text_zero
+        assert "Grandchild A1 body." in text_zero
+
+
+# ---------------------------------------------------------------------------
+# 12. search_sections
+# ---------------------------------------------------------------------------
+
+# Shared fixture content for search_sections tests
+_SEARCH_MD = (
+    "# Root\n\n"
+    "Root intro line.\n\n"
+    "## Alpha\n\n"
+    "Alpha body line one.\n"
+    "Alpha body line two.\n\n"
+    "### Alpha Sub\n\n"
+    "Alpha sub body: the word needle is here.\n\n"
+    "## Beta\n\n"
+    "Beta body with NEEDLE in uppercase.\n\n"
+    "## Gamma\n\n"
+    "Gamma has no matches.\n"
+)
+
+
+class TestSearchSections:
+    def test_no_matches_returns_empty_list(self, tmp_path: Path) -> None:
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        result = doc.search_sections("zzznotfound")
+        assert result == []
+
+    def test_single_match_single_section(self, tmp_path: Path) -> None:
+        """A term appearing only in one section returns one result."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        result = doc.search_sections("Root intro line")
+        assert len(result) == 1
+        assert result[0]["path"] == "Root"
+        assert len(result[0]["matches"]) == 1
+        match = result[0]["matches"][0]
+        assert "Root intro line" in match["text"]
+        assert match["line"] >= 1  # 1-based
+
+    def test_multiple_matches_same_section(self, tmp_path: Path) -> None:
+        """Multiple matching lines in one section → one result with multiple entries."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        result = doc.search_sections("Alpha body line")
+        assert len(result) == 1
+        assert result[0]["path"] == "Root.Alpha"
+        assert len(result[0]["matches"]) == 2
+
+    def test_matches_in_multiple_sections_in_file_order(self, tmp_path: Path) -> None:
+        """Matches in multiple sections → multiple results in file order."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        # "needle" appears in Alpha Sub (lowercase) and Beta (uppercase as NEEDLE)
+        result = doc.search_sections("needle", case_sensitive=False)
+        assert len(result) == 2
+        # File order: Alpha Sub comes before Beta
+        assert result[0]["path"] == "Root.Alpha.Alpha Sub"
+        assert result[1]["path"] == "Root.Beta"
+
+    def test_case_insensitive_by_default(self, tmp_path: Path) -> None:
+        """Default (case_sensitive=False): uppercase query matches lowercase body."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        result = doc.search_sections("ALPHA BODY LINE ONE")
+        assert len(result) == 1
+        assert result[0]["path"] == "Root.Alpha"
+
+    def test_case_sensitive_no_match(self, tmp_path: Path) -> None:
+        """case_sensitive=True: query must match exact case."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        # "NEEDLE" in uppercase only appears in Beta, not Alpha Sub (lowercase "needle")
+        result = doc.search_sections("NEEDLE", case_sensitive=True)
+        assert len(result) == 1
+        assert result[0]["path"] == "Root.Beta"
+
+    def test_regex_pattern_matches(self, tmp_path: Path) -> None:
+        """Regex pattern (e.g. \\d+) matches correctly."""
+        content = "# Root\n\nNo numbers here.\n\n## Numbers\n\nValue: 42 and 7.\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        result = doc.search_sections(r"\d+")
+        assert len(result) == 1
+        assert result[0]["path"] == "Root.Numbers"
+        # Both numbers on the same line → one match entry
+        assert len(result[0]["matches"]) == 1
+
+    def test_invalid_regex_raises_re_error(self, tmp_path: Path) -> None:
+        """Invalid regex raises re.error."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        with pytest.raises(re.error):
+            doc.search_sections("[invalid")
+
+    def test_own_body_only_not_children(self, tmp_path: Path) -> None:
+        """A term in a child section does NOT appear in the parent's result."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        # "needle" is only in the Alpha Sub body, not in Alpha's own body
+        result = doc.search_sections("needle", case_sensitive=True)
+        # Exactly one result (Alpha Sub), NOT Root.Alpha
+        paths = [r["path"] for r in result]
+        assert "Root.Alpha.Alpha Sub" in paths
+        assert "Root.Alpha" not in paths
+
+    def test_line_numbers_are_one_based(self, tmp_path: Path) -> None:
+        """Returned line numbers are 1-based file line numbers."""
+        p = write_md(tmp_path, _SEARCH_MD)
+        doc = MarkdownDocument(p)
+        result = doc.search_sections("Root intro line")
+        assert len(result) == 1
+        line_num = result[0]["matches"][0]["line"]
+        # "Root intro line." is on line 3 (1-based) in _SEARCH_MD
+        assert line_num == 3

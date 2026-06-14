@@ -95,7 +95,8 @@ same section. Ambiguous paths (duplicate heading texts at the same level) resolv
 | Tool | Arguments | Returns | Description |
 |---|---|---|---|
 | `get_index` | `file_path: str` | `dict` | Returns the full section tree of a file as a nested dict with `heading`, `level`, `path`, and `children` fields. |
-| `get_section` | `file_path: str`, `path: str`, `include_children: bool = True` | `str` | Returns the raw Markdown text of the named section. With `include_children=True` (default) the text includes all child sections. |
+| `get_section` | `file_path: str`, `path: str`, `depth: int \| None = None` | `str` | Returns the raw Markdown text of the named section. `depth=None` (default): full subtree; `depth=0`: heading + own body only; `depth=N`: heading + N levels of children. |
+| `search_sections` | `file_path: str`, `query: str`, `case_sensitive: bool = False` | `list` | Searches all section bodies for lines matching `query` (Python regex). Returns a list of `{"path", "matches": [{"line", "text"}]}` objects in file order. Each section's own body is searched independently — results are never duplicated across parent and child. |
 | `add_section` | `file_path: str`, `heading: str`, `content: str`, `under: str \| None = None`, `before: str \| None = None`, `after: str \| None = None` | `str` | Inserts a new section. `heading` must start with `#`–`######` followed by a space. Placement: `under` (last child), `before` (immediately before), `after` (immediately after including its children), or omit all to append. Returns `"ok"`. |
 | `replace_section` | `file_path: str`, `path: str`, `new_content: str` | `str` | Replaces the body of the named section, preserving its heading line. Returns `"ok"`. |
 | `patch_section` | `file_path: str`, `path: str`, `new_content: str` | `str` | Returns a unified diff of what `replace_section` would write, without modifying the file. Returns an empty string if there are no changes. |
@@ -170,6 +171,25 @@ add_section("docs/guide.md", "## Troubleshooting", "See the FAQ.", after="User G
 ```
 
 Returns `"ok"`. The new `## Troubleshooting` section is inserted immediately after `## Configuration`.
+
+**6. Find sections mentioning a term**
+
+```
+search_sections("docs/guide.md", "debug")
+```
+
+Returns:
+
+```json
+[
+  {
+    "path": "User Guide.Configuration",
+    "matches": [
+      {"line": 18, "text": "Set `debug: true` in `config.yaml`."}
+    ]
+  }
+]
+```
 
 ## Development
 

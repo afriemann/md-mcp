@@ -280,7 +280,7 @@ def _section_lines(
     idx: int,
     lines: list[str],
     *,
-    include_children: bool,
+    depth: int | None,
 ) -> tuple[int, int]:
     """Return the (start, end) 0-indexed line range (exclusive end) for the
     section at ``headings[idx]``.
@@ -288,9 +288,14 @@ def _section_lines(
     ``start`` is the heading's start line.
     ``end`` is the line just before the next heading that terminates this section.
 
-    With ``include_children=True``: stop at next heading of *same or higher*
-    level (lower '#' count).
-    With ``include_children=False``: stop at next heading of *any* level.
+    ``depth=None``: stop at next heading of *same or higher* level (i.e. lower
+    or equal ``#`` count) — returns heading + body + all descendants.
+    ``depth=0``: stop at next heading of *any* level — returns heading + own
+    body only, no child sections.
+    ``depth=N`` (N ≥ 1): span from heading start to the end of the deepest
+    allowed descendant (levels ``target_level+1`` … ``target_level+N``); same
+    end-boundary as ``depth=None`` (stop at same-or-higher level).  Headings
+    deeper than ``target_level+N`` are filtered out in ``_section_text``.
     """
     h = headings[idx]
     start = h.start_line
@@ -299,17 +304,81 @@ def _section_lines(
     end = len(lines)
     for j in range(idx + 1, len(headings)):
         next_h = headings[j]
-        if include_children:
+        if depth is None or depth >= 1:
             # Stop at same or higher level (lower or equal '#' count)
             if next_h.level <= h.level:
                 end = next_h.start_line
                 break
         else:
-            # Stop at any heading
+            # depth == 0: stop at any heading
             end = next_h.start_line
             break
 
     return start, end
+
+
+def _section_text(
+    headings: list[_HeadingInfo],
+    idx: int,
+    lines: list[str],
+    *,
+    depth: int | None,
+) -> str:
+    """Return the text of the section, applying depth filtering.
+
+    For ``depth=None`` or ``depth=0``, delegates to ``_section_lines`` and
+    returns a simple slice.  For ``depth >= 1``, excludes lines belonging to
+    headings deeper than ``target_level + depth``.
+    """
+    start, end = _section_lines(headings, idx, lines, depth=depth)
+    if depth is None or depth == 0:
+        return "\n".join(lines[start:end])
+
+    # depth >= 1: filter out sub-sections deeper than target + depth
+    target_level = headings[idx].level
+    max_level = target_level + depth
+
+    # Walk through the line range, skipping blocks owned by too-deep headings.
+    # Build an exclusion set: collect start..end ranges for headings whose
+    # level > max_level.
+    excluded_ranges: list[tuple[int, int]] = []
+    j = idx + 1
+    while j < len(headings) and headings[j].start_line < end:
+        hj = headings[j]
+        if hj.level > max_level:
+            # Find the end of this too-deep block: next heading at any level
+            # that is ≤ max_level (i.e. back within the allowed range) or
+            # the overall section end.
+            block_start = hj.start_line
+            block_end = end
+            k = j + 1
+            while k < len(headings) and headings[k].start_line < end:
+                if headings[k].level <= max_level:
+                    block_end = headings[k].start_line
+                    break
+                k += 1
+            excluded_ranges.append((block_start, block_end))
+            # Skip ahead past all headings in this excluded block
+            j = k
+        else:
+            j += 1
+
+    if not excluded_ranges:
+        return "\n".join(lines[start:end])
+
+    # Build the result by including only non-excluded ranges
+    result_lines: list[str] = []
+    pos = start
+    for ex_start, ex_end in excluded_ranges:
+        result_lines.extend(lines[pos:ex_start])
+        pos = ex_end
+    result_lines.extend(lines[pos:end])
+
+    # Strip trailing blank lines introduced by exclusions
+    while result_lines and result_lines[-1].strip() == "":
+        result_lines.pop()
+
+    return "\n".join(result_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -378,20 +447,105 @@ class MarkdownDocument:
         parsed = self._parsed()
         return {"sections": _build_index_tree(parsed.headings)}
 
-    def get_section(self, path: str, *, include_children: bool = True) -> str:
+    def get_section(self, path: str, *, depth: int | None = None) -> str:
         """Return the heading line(s) + body text of the named section.
 
         ``path`` is a dot-separated heading path.  Literal dots in heading
         text are represented as ``\\.`` (e.g. ``"Root.v1\\.2\\.3"``).
         Raises ``KeyError`` if the path does not resolve.
+
+        ``depth=None`` (default): return heading + body + all descendants.
+        ``depth=0``: return heading + own body only, no child sections.
+        ``depth=N`` (N ≥ 1): return heading + body + N levels of descendants.
         """
         parsed = self._parsed()
         idx = _resolve_path(parsed.headings, path)
         lines = self._read_lines()
-        start, end = _section_lines(
-            parsed.headings, idx, lines, include_children=include_children
-        )
-        return "\n".join(lines[start:end])
+        return _section_text(parsed.headings, idx, lines, depth=depth)
+
+    def search_sections(
+        self,
+        query: str,
+        *,
+        case_sensitive: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Search all section bodies for lines matching ``query`` (regex).
+
+        Returns a list of match objects — one per section that contains at
+        least one hit — sorted by order of first appearance in the file::
+
+            [
+              {
+                "path": "Root.Child",
+                "matches": [
+                  {"line": 12, "text": "...the matching line text..."},
+                  ...
+                ]
+              },
+              ...
+            ]
+
+        ``line`` is 1-based line number within the file.
+        Only the section's *own body* is searched (not its children) so
+        results are not duplicated across parent and child sections.
+        Raises ``re.error`` if ``query`` is not a valid regex.
+        """
+        flags = 0 if case_sensitive else re.IGNORECASE
+        pattern = re.compile(query, flags)  # raises re.error on invalid query
+
+        parsed = self._parsed()
+        headings = parsed.headings
+        lines = self._read_lines()
+
+        # Build a flat {heading_idx: path} mapping from the index tree
+        idx_to_path: dict[int, str] = {}
+
+        def _walk(
+            nodes: list[dict[str, Any]], heading_list: list[_HeadingInfo]
+        ) -> None:
+            for node in nodes:
+                # Find the heading index by matching start_line from the node path
+                # The node stores path and heading text; we need to map it to an index.
+                # We match by text and level using the tree walk order.
+                node_text = node["heading"]
+                node_path = node["path"]
+                # Find the corresponding index in headings
+                for i, h in enumerate(heading_list):
+                    if h.text == node_text and i not in idx_to_path:
+                        # Verify path prefix matches to avoid ambiguity:
+                        # the path is already unique within the tree walk
+                        idx_to_path[i] = node_path
+                        break
+                _walk(node["children"], heading_list)
+
+        # Rebuild tree to get paths
+        tree = _build_index_tree(headings)
+        _walk(tree, headings)
+
+        # Build flat list of (heading_idx, path, body_start, body_end)
+        # body_end = start of next heading at any level (depth=0 boundary), or EOF
+        sections: list[tuple[int, str, int, int]] = []
+        for i, h in enumerate(headings):
+            path = idx_to_path.get(i, "")
+            body_start = h.end_line  # 0-indexed, first line after heading markup
+            # body_end: start of next heading at any level, or EOF
+            if i + 1 < len(headings):
+                body_end = headings[i + 1].start_line
+            else:
+                body_end = len(lines)
+            sections.append((i, path, body_start, body_end))
+
+        results: list[dict[str, Any]] = []
+        for _idx, path, body_start, body_end in sections:
+            matches: list[dict[str, Any]] = []
+            for line_idx in range(body_start, body_end):
+                line_text = lines[line_idx]
+                if pattern.search(line_text):
+                    matches.append({"line": line_idx + 1, "text": line_text})
+            if matches:
+                results.append({"path": path, "matches": matches})
+
+        return results
 
     def add_section(
         self,
@@ -456,7 +610,7 @@ class MarkdownDocument:
         elif after is not None:
             idx = _resolve_path(headings, after)
             # Insert after the entire section (including children)
-            _, section_end = _section_lines(headings, idx, lines, include_children=True)
+            _, section_end = _section_lines(headings, idx, lines, depth=None)
             insert_at = section_end
             # Trim trailing blank lines from the section to avoid double-blanks
             while insert_at > 0 and lines[insert_at - 1].strip() == "":
@@ -466,7 +620,7 @@ class MarkdownDocument:
             # under: insert as last child of the target section
             assert under is not None
             idx = _resolve_path(headings, under)
-            _, section_end = _section_lines(headings, idx, lines, include_children=True)
+            _, section_end = _section_lines(headings, idx, lines, depth=None)
             insert_at = section_end
             while insert_at > 0 and lines[insert_at - 1].strip() == "":
                 insert_at -= 1
@@ -488,7 +642,7 @@ class MarkdownDocument:
         idx = _resolve_path(parsed.headings, path)
         h = parsed.headings[idx]
 
-        start, end = _section_lines(parsed.headings, idx, lines, include_children=True)
+        start, end = _section_lines(parsed.headings, idx, lines, depth=None)
 
         # heading_end_line is where the body begins (after heading markup)
         heading_end = h.end_line  # exclusive, 0-indexed
@@ -530,7 +684,7 @@ class MarkdownDocument:
         parsed = _ParsedDocument.from_text("\n".join(lines))
         idx = _resolve_path(parsed.headings, path)
         h = parsed.headings[idx]
-        start, end = _section_lines(parsed.headings, idx, lines, include_children=True)
+        start, end = _section_lines(parsed.headings, idx, lines, depth=None)
 
         heading_end = h.end_line
         heading_lines = lines[start:heading_end]
@@ -582,7 +736,7 @@ class MarkdownDocument:
         idx = _resolve_path(parsed.headings, path)
 
         start, end = _section_lines(
-            parsed.headings, idx, lines, include_children=include_children
+            parsed.headings, idx, lines, depth=None if include_children else 0
         )
 
         # When not including children, the end is at the first child heading.

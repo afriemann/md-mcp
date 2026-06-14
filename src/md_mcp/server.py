@@ -64,18 +64,25 @@ def get_index(file_path: str) -> dict[str, Any]:
 def get_section(
     file_path: str,
     path: str,
-    include_children: bool = True,
+    depth: int | None = None,
 ) -> str:
     """Return the heading line(s) and body of the section at `path`.
 
     `path` is a dot-separated heading path, e.g. "My README.Installation.Prerequisites".
-    Literal dots in heading text are represented as \\. in path strings.
     Matching is case-insensitive. Returns the raw Markdown text of the section.
-    Raises an error if the path does not exist.
+
+    `depth` controls how many levels of child sections are included:
+      - None (default): return the section and all descendants
+      - 0: return the heading and its own body only (no child sections)
+      - 1: heading + own body + immediate children
+      - 2: heading + own body + children + grandchildren
+      etc.
+
+    Raises an error string if the path does not exist.
     """
     try:
         doc = MarkdownDocument(str(_check_path(file_path)))
-        return doc.get_section(path, include_children=include_children)
+        return doc.get_section(path, depth=depth)
     except PermissionError:
         return f"Error: access denied: {file_path}"
     except FileNotFoundError:
@@ -88,6 +95,50 @@ def get_section(
         return f"Error: file is not valid UTF-8: {file_path}"
     except OSError as e:
         return f"Error: I/O error: {e.strerror}"
+
+
+@mcp.tool()
+def search_sections(
+    file_path: str,
+    query: str,
+    case_sensitive: bool = False,
+) -> list[dict[str, Any]]:
+    """Search all section bodies for lines matching `query` (regex).
+
+    Returns a list of match objects — one per section that contains at least
+    one hit — in file order:
+
+        [
+          {
+            "path": "Root.Child",
+            "matches": [
+              {"line": 12, "text": "...the matching line text..."},
+              ...
+            ]
+          },
+          ...
+        ]
+
+    `line` is the 1-based line number within the file.
+    Only each section's own body is searched (not its children), so results
+    are never duplicated across parent and child sections.
+    `query` is a Python regex; raises an error string if the pattern is invalid.
+    """
+    import re as _re
+
+    try:
+        doc = MarkdownDocument(str(_check_path(file_path)))
+        return doc.search_sections(query, case_sensitive=case_sensitive)
+    except FileNotFoundError:
+        return [{"error": f"file not found: {file_path}"}]
+    except PermissionError:
+        return [{"error": f"access denied: {file_path}"}]
+    except (UnicodeDecodeError, UnicodeError):
+        return [{"error": f"file is not valid UTF-8: {file_path}"}]
+    except OSError as e:
+        return [{"error": f"I/O error: {e.strerror}"}]
+    except _re.error as e:
+        return [{"error": f"invalid regex: {e}"}]
 
 
 @mcp.tool()
