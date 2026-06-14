@@ -122,6 +122,9 @@ def search_sections(
     `line` is the 1-based line number within the file.
     Only each section's own body is searched (not its children), so results
     are never duplicated across parent and child sections.
+    Note: heading text is not searched — only section bodies. If the term you
+    are looking for may appear in a heading, call ``get_index`` first and scan
+    the returned paths.
     `query` is a Python regex; raises an error string if the pattern is invalid.
     """
     import re as _re
