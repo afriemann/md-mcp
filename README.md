@@ -35,17 +35,13 @@ After installation the `md-mcp` entry-point script is on your `PATH`. Add it as 
 
 ### opencode (`opencode.json` / `opencode.jsonc`)
 
-opencode uses the key `mcp.servers`:
-
 ```jsonc
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "servers": {
-      "md-mcp": {
-        "command": "md-mcp",
-        "args": [],
-        "transport": "stdio"
-      }
+    "md-mcp": {
+      "type": "local",
+      "command": ["md-mcp", "--allow-root", "/your/docs/dir"]
     }
   }
 }
