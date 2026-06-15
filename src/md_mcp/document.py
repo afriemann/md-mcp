@@ -603,8 +603,20 @@ class MarkdownDocument:
             idx = _resolve_path(headings, before)
             h = headings[idx]
             insert_at = h.start_line
-            # Ensure blank line before the new block if not at start
-            if insert_at > 0 and lines[insert_at - 1].strip() != "":
+            # Collapse any run of blank lines immediately before the target
+            # heading down to at most one, to avoid double blank separators.
+            end_of_blanks = insert_at
+            while insert_at > 0 and lines[insert_at - 1].strip() == "":
+                insert_at -= 1
+            # Remove the run of blank lines before the target heading.
+            # NOTE: if the file starts with blank lines and the target heading is the
+            # first heading, insert_at will reach 0 and those leading blanks will be
+            # removed as a side effect. This is acceptable because leading blank lines
+            # have no meaning in standard Markdown.
+            del lines[insert_at:end_of_blanks]
+            # Insert exactly one blank separator before the new block (unless
+            # inserting at the very start of the file)
+            if insert_at > 0:
                 block_lines = [""] + block_lines
             lines[insert_at:insert_at] = block_lines
         elif after is not None:
@@ -612,9 +624,12 @@ class MarkdownDocument:
             # Insert after the entire section (including children)
             _, section_end = _section_lines(headings, idx, lines, depth=None)
             insert_at = section_end
-            # Trim trailing blank lines from the section to avoid double-blanks
+            # Find where trailing blanks start
             while insert_at > 0 and lines[insert_at - 1].strip() == "":
                 insert_at -= 1
+            # Remove the trailing blank lines that were already there
+            del lines[insert_at:section_end]
+            # Insert with exactly one leading blank separator
             lines[insert_at:insert_at] = [""] + block_lines
         else:
             # under: insert as last child of the target section
@@ -622,8 +637,12 @@ class MarkdownDocument:
             idx = _resolve_path(headings, under)
             _, section_end = _section_lines(headings, idx, lines, depth=None)
             insert_at = section_end
+            # Find where trailing blanks start
             while insert_at > 0 and lines[insert_at - 1].strip() == "":
                 insert_at -= 1
+            # Remove the trailing blank lines that were already there
+            del lines[insert_at:section_end]
+            # Insert with exactly one leading blank separator
             lines[insert_at:insert_at] = [""] + block_lines
 
         self._write_lines(lines)

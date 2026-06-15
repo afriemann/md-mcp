@@ -257,6 +257,68 @@ class TestAddSection:
         assert text.index("## New") > text.index("### Sub A1")
         assert text.index("## New") < text.index("## Section B")
 
+    def test_add_after_produces_exactly_one_blank_separator(
+        self, tmp_path: Path
+    ) -> None:
+        """add_section with after= must leave exactly one blank line between
+        the inserted section and the following sibling — no double blank lines."""
+        content = "# Root\n\n## Section A\n\nBody A\n\n## Section B\n\nBody B\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section("## New", "New body", after="Root.Section A")
+        text = p.read_text(encoding="utf-8")
+        # Negative: no triple newline anywhere
+        assert "\n\n\n" not in text
+        # Positive: exactly the right separator sequence
+        assert "Body A\n\n## New\n\nNew body\n\n## Section B" in text
+
+    def test_add_before_no_double_blank(self, tmp_path: Path) -> None:
+        """add_section with before= must not produce double blank lines,
+        even when there are already multiple blank lines before the target heading."""
+        # Use triple-blank-separated input to trigger the pre-existing-blank bug
+        content = "# Root\n\n## Section A\n\nBody A\n\n\n## Section B\n\nBody B\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section("## New", "New body", before="Root.Section B")
+        text = p.read_text(encoding="utf-8")
+        assert "\n\n\n" not in text
+
+    def test_add_under_no_double_blank(self, tmp_path: Path) -> None:
+        """add_section with under= must not produce double blank lines."""
+        content = (
+            "# Root\n\n"
+            "## Section A\n\nBody A\n\n"
+            "### Sub A1\n\nSub body\n\n"
+            "## Section B\n\nBody B\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section("### Sub A2", "Sub body 2", under="Root.Section A")
+        text = p.read_text(encoding="utf-8")
+        assert "\n\n\n" not in text
+
+    def test_add_before_first_heading_no_leading_blank(self, tmp_path: Path) -> None:
+        """before= on the first heading must not prepend a blank line at start of file."""
+        content = "# Root\n\n## Section A\n\nBody A\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section("## Intro", "intro body", before="Root")
+        text = p.read_text(encoding="utf-8")
+        assert text.startswith("## Intro\n"), (
+            f"File must not start with blank line; got {text[:30]!r}"
+        )
+        assert "\n\n\n" not in text
+
+    def test_add_after_last_section(self, tmp_path: Path) -> None:
+        """after= on the last section in the file (section_end == len(lines))."""
+        content = "# Root\n\n## Section A\n\nBody A\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section("## New", "New body", after="Root.Section A")
+        text = p.read_text(encoding="utf-8")
+        assert "Body A\n\n## New\n\nNew body\n" in text
+        assert "\n\n\n" not in text
+
 
 # ---------------------------------------------------------------------------
 # 4. replace_section
