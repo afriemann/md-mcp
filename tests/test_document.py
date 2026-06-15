@@ -318,6 +318,56 @@ class TestReplaceSection:
         assert "# Root" in text
         assert "Old body" not in text
 
+    def test_replace_own_body_preserves_child_sections(self, tmp_path: Path) -> None:
+        content = "# Root\n\nOld preamble\n\n## Child\n\nChild body\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Root", "New preamble")
+        text = p.read_text(encoding="utf-8")
+        assert "# Root" in text
+        assert "New preamble" in text
+        assert "Old preamble" not in text
+        assert "## Child" in text
+        assert "Child body" in text
+
+    def test_replace_root_h1_does_not_wipe_document(self, tmp_path: Path) -> None:
+        content = (
+            "# Root\n\nRoot intro\n\n"
+            "## Section A\n\nBody A\n\n"
+            "## Section B\n\nBody B\n\n"
+            "## Section C\n\nBody C\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Root", "New intro")
+        text = p.read_text(encoding="utf-8")
+        assert "## Section A" in text
+        assert "Body A" in text
+        assert "## Section B" in text
+        assert "Body B" in text
+        assert "## Section C" in text
+        assert "Body C" in text
+        assert "Root intro" not in text
+        assert "New intro" in text
+
+    def test_replace_mid_level_heading_preserves_children(self, tmp_path: Path) -> None:
+        content = (
+            "# Root\n\n"
+            "## Parent\n\nParent preamble\n\n"
+            "### Grandchild\n\nGrandchild body\n\n"
+            "## Sibling\n\nSibling body\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Root.Parent", "New parent body")
+        text = p.read_text(encoding="utf-8")
+        assert "### Grandchild" in text
+        assert "Grandchild body" in text
+        assert "## Sibling" in text
+        assert "Sibling body" in text
+        assert "Parent preamble" not in text
+        assert "New parent body" in text
+
 
 # ---------------------------------------------------------------------------
 # 5. patch_section
@@ -359,6 +409,18 @@ class TestPatchSection:
         doc = MarkdownDocument(p)
         with pytest.raises(KeyError):
             doc.patch_section("Root.NonExistent", "New body")
+
+    def test_patch_does_not_include_child_sections_in_diff(
+        self, tmp_path: Path
+    ) -> None:
+        content = "# Root\n\nIntro\n\n## Child\n\nChild body\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        diff = doc.patch_section("Root", "New intro")
+        assert "+New intro" in diff
+        assert "-Intro" in diff
+        assert "-## Child" not in diff
+        assert "-Child body" not in diff
 
 
 # ---------------------------------------------------------------------------

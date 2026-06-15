@@ -642,7 +642,10 @@ class MarkdownDocument:
         idx = _resolve_path(parsed.headings, path)
         h = parsed.headings[idx]
 
-        start, end = _section_lines(parsed.headings, idx, lines, depth=None)
+        # Use depth=0 so we get only the heading + own body, stopping before
+        # any child heading.  Replacing lines[start:own_body_end] leaves all
+        # child sections intact.
+        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=0)
 
         # heading_end_line is where the body begins (after heading markup)
         heading_end = h.end_line  # exclusive, 0-indexed
@@ -655,9 +658,9 @@ class MarkdownDocument:
         else:
             body_lines = []
 
-        # Preserve trailing blank line(s) at end of section
+        # Preserve trailing blank line(s) at end of own body
         trailing: list[str] = []
-        j = end - 1
+        j = own_body_end - 1
         while j >= heading_end and j < len(lines) and lines[j].strip() == "":
             trailing.insert(0, lines[j])
             j -= 1
@@ -665,7 +668,7 @@ class MarkdownDocument:
             trailing = [""]
 
         new_section = heading_lines + body_lines + trailing
-        lines[start:end] = new_section
+        lines[start:own_body_end] = new_section
         self._write_lines(lines)
 
     def patch_section(self, path: str, new_content: str) -> str:
@@ -684,7 +687,9 @@ class MarkdownDocument:
         parsed = _ParsedDocument.from_text("\n".join(lines))
         idx = _resolve_path(parsed.headings, path)
         h = parsed.headings[idx]
-        start, end = _section_lines(parsed.headings, idx, lines, depth=None)
+        # Use depth=0 so only the heading's own body is included in the diff;
+        # child sections must not appear as removed lines.
+        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=0)
 
         heading_end = h.end_line
         heading_lines = lines[start:heading_end]
@@ -696,7 +701,7 @@ class MarkdownDocument:
             body_lines = []
 
         trailing: list[str] = []
-        j = end - 1
+        j = own_body_end - 1
         while j >= heading_end and j < len(lines) and lines[j].strip() == "":
             trailing.insert(0, lines[j])
             j -= 1
@@ -704,7 +709,7 @@ class MarkdownDocument:
             trailing = [""]
 
         new_section = heading_lines + body_lines + trailing
-        new_lines = lines[:start] + new_section + lines[end:]
+        new_lines = lines[:start] + new_section + lines[own_body_end:]
         new_text = "\n".join(new_lines)
         if new_text and not new_text.endswith("\n"):
             new_text += "\n"
