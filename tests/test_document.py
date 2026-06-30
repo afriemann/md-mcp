@@ -430,6 +430,43 @@ class TestReplaceSection:
         assert "Parent preamble" not in text
         assert "New parent body" in text
 
+    def test_replace_strips_leading_heading_from_new_content(
+        self, tmp_path: Path
+    ) -> None:
+        """When new_content starts with the section heading, it must be stripped.
+
+        Agents often include the heading line in new_content (e.g.
+        ``"## My Section\\nNew body"``). replace_section already preserves the
+        existing heading; the supplied heading line must be silently dropped so
+        the result is identical to passing body-only content.
+        """
+        content = "# Root\n\n## My Section\n\nOld body\n\n## Other\n\nOther body\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        # Pass the heading as part of new_content (the common agent mistake)
+        doc.replace_section("Root.My Section", "## My Section\nNew body here")
+        text = p.read_text(encoding="utf-8")
+        # Heading appears exactly once
+        assert text.count("## My Section") == 1
+        # Body was replaced correctly
+        assert "New body here" in text
+        assert "Old body" not in text
+        # Other section untouched
+        assert "## Other" in text
+        assert "Other body" in text
+
+    def test_replace_strips_leading_heading_any_level(self, tmp_path: Path) -> None:
+        """Stripping works regardless of heading level (h1 through h6)."""
+        content = "# Root\n\nOld body\n\n## Child\n\nChild body\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Root", "# Root\nNew preamble")
+        text = p.read_text(encoding="utf-8")
+        assert text.count("# Root") == 1
+        assert "New preamble" in text
+        assert "Old body" not in text
+        assert "## Child" in text
+
 
 # ---------------------------------------------------------------------------
 # 5. patch_section
@@ -483,6 +520,41 @@ class TestPatchSection:
         assert "-Intro" in diff
         assert "-## Child" not in diff
         assert "-Child body" not in diff
+
+    def test_patch_strips_leading_heading_from_new_content(
+        self, tmp_path: Path
+    ) -> None:
+        """When new_content starts with the section heading, the diff must not
+        show the heading duplicated.
+
+        This is the canonical agent mistake: including the heading line in
+        new_content (e.g. ``"## Use cases\\nNew body"``).  The diff must be
+        identical to passing body-only content and must NOT show the heading as
+        an added line.
+        """
+        content = "# Root\n\n## Use cases\n\nOld body\n\n## Notes\n\nNotes body\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        # Simulate the agent mistake: heading included in new_content
+        diff = doc.patch_section("Root.Use cases", "## Use cases\nNew body here")
+        # The heading must not appear as an added line
+        assert "+## Use cases" not in diff
+        # Only the body change is shown
+        assert "+New body here" in diff
+        assert "-Old body" in diff
+        # Notes section must not appear as a removed line
+        assert "-## Notes" not in diff
+
+    def test_patch_strips_leading_heading_produces_same_diff_as_body_only(
+        self, tmp_path: Path
+    ) -> None:
+        """Passing heading+body must yield the exact same diff as body-only."""
+        content = "# Root\n\nOld content\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        diff_with_heading = doc.patch_section("Root", "# Root\nNew content")
+        diff_body_only = doc.patch_section("Root", "New content")
+        assert diff_with_heading == diff_body_only
 
 
 # ---------------------------------------------------------------------------

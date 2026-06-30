@@ -385,6 +385,36 @@ def _section_text(
 # Public class
 # ---------------------------------------------------------------------------
 
+_HEADING_LINE_RE = re.compile(r"^#{1,6}(?:\s|$)")
+
+
+def _strip_leading_heading(new_content: str) -> str:
+    """Strip a leading Markdown heading line from *new_content*, if present.
+
+    When an agent passes replacement text that starts with the section heading
+    (e.g. ``"## My Section\\nNew body"``), ``replace_section`` and
+    ``patch_section`` would otherwise insert a duplicate heading because they
+    already preserve the existing one.  This helper removes that first line so
+    the result is identical to passing body-only content.
+
+    A blank line immediately following the stripped heading is also removed so
+    the body content starts cleanly.
+    """
+    if not new_content:
+        return new_content
+    first_newline = new_content.find("\n")
+    if first_newline == -1:
+        # Single line — strip it if it's a heading, leaving an empty body
+        return "" if _HEADING_LINE_RE.match(new_content) else new_content
+    first_line = new_content[:first_newline]
+    if not _HEADING_LINE_RE.match(first_line):
+        return new_content
+    remainder = new_content[first_newline + 1 :]
+    # Also strip one leading blank line that often follows a heading
+    if remainder.startswith("\n"):
+        remainder = remainder[1:]
+    return remainder
+
 
 class MarkdownDocument:
     """Surgical read/write access to a Markdown file's sections."""
@@ -654,7 +684,14 @@ class MarkdownDocument:
         text are represented as ``\\.`` (e.g. ``"Root.v1\\.2\\.3"``).
         Writes to file and invalidates the cache.
         Raises ``KeyError`` if the path does not resolve.
+
+        ``new_content`` is the **body only** — do not include the heading line.
+        If ``new_content`` starts with a Markdown heading (``# …`` through
+        ``###### …``), that line is silently stripped so the result is
+        identical to passing body-only content.  This handles the common case
+        where an agent includes the heading line in the replacement text.
         """
+        new_content = _strip_leading_heading(new_content)
         # Re-read right before write
         lines = self._read_lines()
         parsed = _ParsedDocument.from_text("\n".join(lines))
@@ -696,7 +733,14 @@ class MarkdownDocument:
         ``path`` is a dot-separated heading path.  Literal dots in heading
         text are represented as ``\\.`` (e.g. ``"Root.v1\\.2\\.3"``).
         Does NOT write to file.
+
+        ``new_content`` is the **body only** — do not include the heading line.
+        If ``new_content`` starts with a Markdown heading (``# …`` through
+        ``###### …``), that line is silently stripped so the resulting diff is
+        identical to passing body-only content.  This handles the common case
+        where an agent includes the heading line in the replacement text.
         """
+        new_content = _strip_leading_heading(new_content)
         # Get current content
         original_text = self._read_text()
         original_lines = original_text.splitlines(keepends=True)
