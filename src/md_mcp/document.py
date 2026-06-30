@@ -15,7 +15,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from mistletoe import Document as MistletoeDocument
+from mistletoe.block_token import Document as MistletoeDocument
 from mistletoe.block_token import Heading, SetextHeading
 from mistletoe.span_token import RawText
 
@@ -416,6 +416,17 @@ def _strip_leading_heading(new_content: str) -> str:
     return remainder
 
 
+def _new_content_has_child_headings(new_content: str) -> bool:
+    """Return True if *new_content* contains any Markdown heading lines.
+
+    Used to decide whether ``replace_section`` / ``patch_section`` must replace
+    the full section span (heading + body + children) rather than only the own
+    body.  Called after ``_strip_leading_heading`` has already removed the
+    section's own heading line, so any remaining heading belongs to a child.
+    """
+    return any(_HEADING_LINE_RE.match(line) for line in new_content.splitlines())
+
+
 class MarkdownDocument:
     """Surgical read/write access to a Markdown file's sections."""
 
@@ -698,10 +709,13 @@ class MarkdownDocument:
         idx = _resolve_path(parsed.headings, path)
         h = parsed.headings[idx]
 
-        # Use depth=0 so we get only the heading + own body, stopping before
-        # any child heading.  Replacing lines[start:own_body_end] leaves all
-        # child sections intact.
-        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=0)
+        # If new_content contains child headings, the agent is supplying a full
+        # section replacement (heading + body + children).  Use depth=None so
+        # the entire existing span (including children) is replaced atomically.
+        # Otherwise use depth=0 to touch only the own body and leave children intact.
+        has_children = _new_content_has_child_headings(new_content)
+        depth: int | None = None if has_children else 0
+        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=depth)
 
         # heading_end_line is where the body begins (after heading markup)
         heading_end = h.end_line  # exclusive, 0-indexed
@@ -750,9 +764,12 @@ class MarkdownDocument:
         parsed = _ParsedDocument.from_text("\n".join(lines))
         idx = _resolve_path(parsed.headings, path)
         h = parsed.headings[idx]
-        # Use depth=0 so only the heading's own body is included in the diff;
-        # child sections must not appear as removed lines.
-        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=0)
+        # If new_content contains child headings, use depth=None to include the
+        # full existing span in the diff; otherwise depth=0 so child sections
+        # do not appear as removed lines.
+        has_children = _new_content_has_child_headings(new_content)
+        depth: int | None = None if has_children else 0
+        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=depth)
 
         heading_end = h.end_line
         heading_lines = lines[start:heading_end]

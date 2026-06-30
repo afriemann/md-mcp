@@ -25,3 +25,13 @@ md-mcp = "md_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/md_mcp"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+]

@@ -467,6 +467,63 @@ class TestReplaceSection:
         assert "Old body" not in text
         assert "## Child" in text
 
+    def test_replace_with_child_sections_in_new_content_replaces_full_section(
+        self, tmp_path: Path
+    ) -> None:
+        """When new_content contains child headings, the entire section
+        (including existing children) is replaced atomically.
+
+        This is the scenario where an agent reads the full section with
+        get_section(depth=None), edits it, and passes the result back.
+        The existing children must NOT be preserved separately — the
+        replacement is the full new section tree.
+        """
+        content = (
+            "# Root\n\n"
+            "## Use cases\n\n"
+            "Old preamble\n\n"
+            "### Notes\n\n"
+            "Old notes\n\n"
+            "## Other\n\n"
+            "Other body\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        # Agent passes the full section including updated child
+        new_content = "## Use cases\n\nNew preamble\n\n### Notes\n\nNew notes\n"
+        doc.replace_section("Root.Use cases", new_content)
+        text = p.read_text(encoding="utf-8")
+        # Heading appears exactly once
+        assert text.count("## Use cases") == 1
+        # Notes child appears exactly once
+        assert text.count("### Notes") == 1
+        # Content updated
+        assert "New preamble" in text
+        assert "New notes" in text
+        # Old content gone
+        assert "Old preamble" not in text
+        assert "Old notes" not in text
+        # Sibling untouched
+        assert "## Other" in text
+        assert "Other body" in text
+
+    def test_replace_with_child_sections_body_only_preserves_children(
+        self, tmp_path: Path
+    ) -> None:
+        """When new_content contains no child headings, children are preserved
+        (existing depth=0 behaviour is unchanged).
+        """
+        content = "# Root\n\nOld preamble\n\n## Child\n\nChild body\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Root", "New preamble")
+        text = p.read_text(encoding="utf-8")
+        assert "New preamble" in text
+        assert "Old preamble" not in text
+        # Child preserved
+        assert "## Child" in text
+        assert "Child body" in text
+
 
 # ---------------------------------------------------------------------------
 # 5. patch_section
@@ -555,6 +612,42 @@ class TestPatchSection:
         diff_with_heading = doc.patch_section("Root", "# Root\nNew content")
         diff_body_only = doc.patch_section("Root", "New content")
         assert diff_with_heading == diff_body_only
+
+    def test_patch_with_child_sections_shows_no_duplication(
+        self, tmp_path: Path
+    ) -> None:
+        """When new_content contains the full section (heading + children),
+        the diff must not show duplicate child sections.
+
+        This is the canonical agent failure: reading a section with depth=None,
+        editing it, and passing the full text back — the diff must show only
+        the body lines that actually changed, with no duplication of child
+        headings.
+        """
+        content = (
+            "# Root\n\n"
+            "## Use cases\n\n"
+            "Old preamble\n\n"
+            "### Notes\n\n"
+            "Old notes\n\n"
+            "## Other\n\n"
+            "Other body\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        new_content = "## Use cases\n\nNew preamble\n\n### Notes\n\nNew notes\n"
+        diff = doc.patch_section("Root.Use cases", new_content)
+        # Only the changed lines should appear — body text replaced
+        assert "-Old preamble" in diff
+        assert "+New preamble" in diff
+        assert "-Old notes" in diff
+        assert "+New notes" in diff
+        # ### Notes heading must NOT be duplicated (not added and not removed)
+        assert "+### Notes" not in diff
+        assert "-### Notes" not in diff
+        # Sibling ## Other must not be added or removed (only appears as context at most)
+        assert "+## Other" not in diff
+        assert "-## Other" not in diff
 
 
 # ---------------------------------------------------------------------------

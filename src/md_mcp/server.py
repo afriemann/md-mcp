@@ -91,8 +91,6 @@ def get_section(
         return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}"
-    except (UnicodeDecodeError, UnicodeError):
-        return f"Error: file is not valid UTF-8: {file_path}"
     except OSError as e:
         return f"Error: I/O error: {e.strerror}"
 
@@ -175,8 +173,6 @@ def add_section(
         return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}"
-    except (UnicodeDecodeError, UnicodeError):
-        return f"Error: file is not valid UTF-8: {file_path}"
     except OSError as e:
         return f"Error: I/O error: {e.strerror}"
 
@@ -200,8 +196,6 @@ def replace_section(file_path: str, path: str, new_content: str) -> str:
         return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}"
-    except (UnicodeDecodeError, UnicodeError):
-        return f"Error: file is not valid UTF-8: {file_path}"
     except OSError as e:
         return f"Error: I/O error: {e.strerror}"
 
@@ -224,8 +218,6 @@ def patch_section(file_path: str, path: str, new_content: str) -> str:
         return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}"
-    except (UnicodeDecodeError, UnicodeError):
-        return f"Error: file is not valid UTF-8: {file_path}"
     except OSError as e:
         return f"Error: I/O error: {e.strerror}"
 
@@ -254,8 +246,6 @@ def delete_section(
         return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}"
-    except (UnicodeDecodeError, UnicodeError):
-        return f"Error: file is not valid UTF-8: {file_path}"
     except OSError as e:
         return f"Error: I/O error: {e.strerror}"
 
