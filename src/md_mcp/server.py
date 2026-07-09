@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 from md_mcp.document import MarkdownDocument
@@ -255,6 +259,66 @@ def delete_section(
 # ---------------------------------------------------------------------------
 
 
+async def _run_with_graceful_shutdown() -> None:
+    """Run the MCP server with cooperative SIGTERM handling.
+
+    Replaces the default SIGTERM handler (``SIG_DFL`` — immediate C-level kill)
+    with anyio's signal receiver.  When SIGTERM arrives:
+
+    1. Cooperative cancellation propagates through ``_mcp_server.run()``,
+       so any in-flight tool-call handlers can run their ``finally`` blocks.
+    2. A 1-second force-exit watchdog is started via ``asyncio.create_task``.
+       This watchdog is *outside* the anyio task group and therefore survives
+       scope cancellation.  If the graceful shutdown hangs (because
+       ``stdio_server``'s ``stdin_reader`` task is blocked in a worker thread
+       waiting for data on the still-open stdin pipe), the watchdog calls
+       ``os._exit(0)`` after one second, terminating the process cleanly.
+    3. If the process exits normally before the watchdog fires (e.g. stdin EOF
+       closes the pipe), the asyncio event loop shuts down and cancels the
+       pending watchdog task.
+
+    The normal stdin-EOF shutdown path is preserved: when ``run_stdio_async()``
+    returns on its own, the task group exits without the watchdog ever firing.
+
+    Note: ``asyncio.create_task`` and ``asyncio.sleep`` are used intentionally
+    (not anyio equivalents) so the watchdog task is scheduled directly on the
+    asyncio event loop and survives anyio scope cancellation.  This requires the
+    asyncio backend, which is what ``anyio.run()`` uses by default and what
+    ``main()`` relies on.
+    """
+    with anyio.open_signal_receiver(signal.SIGTERM) as sigterm:
+        # Signal handler is now installed.  Emit a marker so tests (and
+        # operators) can detect reliably when it is safe to send SIGTERM.
+        print("SIGTERM-handler-ready", file=sys.stderr, flush=True)
+        async with anyio.create_task_group() as tg:
+
+            async def _watch_sigterm() -> None:
+                async for _ in sigterm:
+                    # Start a force-exit watchdog outside the task group so it
+                    # survives scope cancellation.  It gives the cooperative
+                    # cancellation path 1 second to complete in-flight handler
+                    # ``finally`` blocks, then calls os._exit(0) to break out of
+                    # any thread-level hang (e.g. the stdin_reader worker thread
+                    # blocked on readline() of an open pipe).
+                    # asyncio.create_task (not anyio) is intentional — see docstring.
+                    async def _force_exit() -> None:
+                        await asyncio.sleep(1.0)
+                        os._exit(0)
+
+                    asyncio.create_task(_force_exit())
+                    tg.cancel_scope.cancel()
+                    return
+
+            tg.start_soon(_watch_sigterm)
+            try:
+                await mcp.run_stdio_async()
+            finally:
+                # Cancel _watch_sigterm when run_stdio_async() returns (stdin
+                # EOF normal path) so the task group exits without waiting for
+                # a signal that will never come.
+                tg.cancel_scope.cancel()
+
+
 def main() -> None:
     """Run the md-mcp MCP server over stdio."""
     global _allowed_roots  # noqa: PLW0603
@@ -286,4 +350,4 @@ def main() -> None:
     else:
         _allowed_roots = [Path(p).expanduser().resolve() for p in args.allow_roots]
 
-    mcp.run(transport="stdio")
+    anyio.run(_run_with_graceful_shutdown)
