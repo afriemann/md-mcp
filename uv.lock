@@ -562,6 +562,7 @@ name = "md-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "mcp", extra = ["cli"] },
     { name = "mistletoe" },
 ]
@@ -581,6 +582,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.0,<5" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27.2,<2" },
     { name = "mistletoe", specifier = "==1.5.1" },
     { name = "mypy", marker = "extra == 'dev'" },
