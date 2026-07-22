@@ -524,6 +524,127 @@ class TestReplaceSection:
         assert "## Child" in text
         assert "Child body" in text
 
+    # ------------------------------------------------------------------
+    # HTML comment preservation
+    # ------------------------------------------------------------------
+
+    def test_replace_preserves_single_line_html_comment_before_next_heading(
+        self, tmp_path: Path
+    ) -> None:
+        """A single-line HTML comment between sections must survive replace_section.
+
+        Reproduces the ``<!-- BEGIN_TF_DOCS -->`` marker loss reported when
+        ``md_replace_section`` eats a comment sitting just before a heading.
+        """
+        content = (
+            "## Section A\n\nOld body\n\n"
+            "<!-- BEGIN_TF_DOCS -->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Section A", "New body")
+        text = p.read_text(encoding="utf-8")
+        assert "New body" in text
+        assert "Old body" not in text
+        assert "<!-- BEGIN_TF_DOCS -->" in text
+        assert "## Requirements" in text
+
+    def test_replace_preserves_multi_line_html_comment_before_next_heading(
+        self, tmp_path: Path
+    ) -> None:
+        """A multi-line HTML comment spanning several lines must also be preserved."""
+        content = (
+            "## Section A\n\nOld body\n\n"
+            "<!--\n  BEGIN_TF_DOCS\n-->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Section A", "New body")
+        text = p.read_text(encoding="utf-8")
+        assert "New body" in text
+        assert "Old body" not in text
+        assert "<!--" in text
+        assert "BEGIN_TF_DOCS" in text
+        assert "-->" in text
+        assert "## Requirements" in text
+
+    def test_replace_html_comment_not_preserved_at_eof(self, tmp_path: Path) -> None:
+        """An HTML comment at the end of the last section (no following heading)
+        is part of the section body and must be replaced, not preserved.
+        """
+        content = "## Section A\n\nOld body\n<!-- a section note -->\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Section A", "New body")
+        text = p.read_text(encoding="utf-8")
+        assert "New body" in text
+        assert "Old body" not in text
+        assert "<!-- a section note -->" not in text
+
+    def test_replace_html_comment_no_duplicate_when_content_includes_separator(
+        self, tmp_path: Path
+    ) -> None:
+        """When the agent passes back content that was read via get_section
+        (which already contains the separator comment), replace_section must
+        not duplicate the comment in the output.
+        """
+        content = (
+            "## Section A\n\nBody\n\n"
+            "<!-- BEGIN_TF_DOCS -->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        # Simulate get_section output → passed back unchanged
+        section_text = doc.get_section("Section A", depth=0)
+        doc.replace_section("Section A", section_text)
+        result = p.read_text(encoding="utf-8")
+        # Exactly one occurrence of the marker
+        assert result.count("<!-- BEGIN_TF_DOCS -->") == 1
+
+    def test_replace_preserves_html_comment_with_blank_lines(
+        self, tmp_path: Path
+    ) -> None:
+        """Blank lines between the section body and the HTML comment are also
+        preserved; the comment must appear before the next heading.
+        """
+        content = (
+            "## Section A\n\nOld body\n\n\n"
+            "<!-- BEGIN_TF_DOCS -->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Section A", "New body")
+        text = p.read_text(encoding="utf-8")
+        assert "<!-- BEGIN_TF_DOCS -->" in text
+        assert "## Requirements" in text
+        # The comment must appear immediately before the Requirements heading
+        idx_comment = text.index("<!-- BEGIN_TF_DOCS -->")
+        idx_heading = text.index("## Requirements")
+        assert idx_comment < idx_heading
+
+    def test_replace_different_html_comment_in_new_content_not_stripped(
+        self, tmp_path: Path
+    ) -> None:
+        """An HTML comment in new_content that is *different* from the separator
+        must not be removed by the deduplication logic.
+        """
+        content = (
+            "## Section A\n\nOld body\n\n"
+            "<!-- BEGIN_TF_DOCS -->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.replace_section("Section A", "New body\n<!-- my own note -->")
+        text = p.read_text(encoding="utf-8")
+        assert "New body" in text
+        assert "<!-- my own note -->" in text
+        assert "<!-- BEGIN_TF_DOCS -->" in text
+
 
 # ---------------------------------------------------------------------------
 # 5. patch_section
@@ -648,6 +769,36 @@ class TestPatchSection:
         # Sibling ## Other must not be added or removed (only appears as context at most)
         assert "+## Other" not in diff
         assert "-## Other" not in diff
+
+    def test_patch_preserves_single_line_html_comment_before_next_heading(
+        self, tmp_path: Path
+    ) -> None:
+        """patch_section diff must not show the separator comment as removed."""
+        content = (
+            "## Section A\n\nOld body\n\n"
+            "<!-- BEGIN_TF_DOCS -->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        diff = doc.patch_section("Section A", "New body")
+        assert "-<!-- BEGIN_TF_DOCS -->" not in diff
+        assert "+<!-- BEGIN_TF_DOCS -->" not in diff
+
+    def test_patch_preserves_multi_line_html_comment_before_next_heading(
+        self, tmp_path: Path
+    ) -> None:
+        """patch_section diff must not show a multi-line separator comment as removed."""
+        content = (
+            "## Section A\n\nOld body\n\n"
+            "<!--\n  BEGIN_TF_DOCS\n-->\n"
+            "## Requirements\n\nreq content\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        diff = doc.patch_section("Section A", "New body")
+        assert "-<!--" not in diff
+        assert "--->" not in diff
 
 
 # ---------------------------------------------------------------------------

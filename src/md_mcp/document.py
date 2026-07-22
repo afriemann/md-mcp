@@ -427,6 +427,102 @@ def _new_content_has_child_headings(new_content: str) -> bool:
     return any(_HEADING_LINE_RE.match(line) for line in new_content.splitlines())
 
 
+def _peek_html_comment_backward(
+    lines: list[str],
+    j: int,
+    heading_end: int,
+) -> tuple[int, list[str]] | None:
+    """Try to read an HTML comment block whose last line is ``lines[j]``.
+
+    Handles both single-line (``<!-- … -->``) and multi-line comments.
+
+    Returns ``(new_j, comment_lines)`` where *new_j* is the index immediately
+    before the comment block, or ``None`` if ``lines[j]`` is not the end of an
+    HTML comment.
+    """
+    stripped = lines[j].strip()
+
+    # Single-line: starts with <!-- and ends with --> on the same line.
+    if stripped.startswith("<!--") and stripped.endswith("-->"):
+        return j - 1, [lines[j]]
+
+    # Multi-line end: ends with --> but the opening <!-- is on an earlier line.
+    if stripped.endswith("-->"):
+        comment_lines: list[str] = [lines[j]]
+        k = j - 1
+        while k >= heading_end:
+            comment_lines.insert(0, lines[k])
+            if lines[k].strip().startswith("<!--"):
+                return k - 1, comment_lines
+            k -= 1
+        # Reached heading_end without finding the opening <!-- — not a valid
+        # comment block; do not capture.
+
+    return None
+
+
+def _collect_trailing_separator(
+    lines: list[str],
+    own_body_end: int,
+    heading_end: int,
+) -> list[str]:
+    """Return the separator lines at the tail of a section's line range.
+
+    Captures blank lines and, **only when the section is followed by another
+    heading** (``own_body_end < len(lines)``), single- or multi-line HTML
+    comment blocks.  These separator lines are preserved verbatim when a
+    section is replaced so that markers such as ``<!-- BEGIN_TF_DOCS -->``
+    are not silently dropped.
+
+    When the section reaches end-of-file (``own_body_end == len(lines)``),
+    HTML comments are not captured — they are part of the section body and
+    the caller may legitimately replace them.
+    """
+    has_next_section = own_body_end < len(lines)
+    natural_sep: list[str] = []
+    j = own_body_end - 1
+    while j >= heading_end:
+        line = lines[j]
+        if line.strip() == "":
+            natural_sep.insert(0, line)
+            j -= 1
+            continue
+        if has_next_section:
+            result = _peek_html_comment_backward(lines, j, heading_end)
+            if result is not None:
+                new_j, comment_lines = result
+                natural_sep = comment_lines + natural_sep
+                j = new_j
+                continue
+        break
+    return natural_sep
+
+
+def _strip_separator_from_tail(
+    raw_lines: list[str],
+    natural_sep: list[str],
+) -> list[str]:
+    """Remove separator lines from the tail of *raw_lines* in-place.
+
+    When an agent passes back content it previously read via ``get_section``
+    (which includes the trailing separator), the separator would otherwise be
+    written twice — once from the agent's ``new_content`` and once from
+    ``_collect_trailing_separator``.  Stripping the matching tail avoids the
+    duplication while leaving any *different* content at the tail untouched.
+
+    Matching is done right-to-left so only a suffix that exactly equals
+    *natural_sep* (in order) is removed; a different comment at the tail is
+    left alone.
+
+    Returns the (possibly shorter) list; the input list is mutated.
+    """
+    sep_to_strip = list(natural_sep)
+    while sep_to_strip and raw_lines and raw_lines[-1] == sep_to_strip[-1]:
+        raw_lines.pop()
+        sep_to_strip.pop()
+    return raw_lines
+
+
 class MarkdownDocument:
     """Surgical read/write access to a Markdown file's sections."""
 
@@ -721,21 +817,21 @@ class MarkdownDocument:
         heading_end = h.end_line  # exclusive, 0-indexed
         heading_lines = lines[start:heading_end]
 
-        # Build new body lines
-        new_body = new_content.rstrip("\n")
-        if new_body:
-            body_lines = [""] + new_body.splitlines()
-        else:
-            body_lines = []
+        # Collect the separator: blank lines and HTML comment blocks that sit
+        # between this section's content and the next heading.  These are
+        # preserved verbatim so markers like <!-- BEGIN_TF_DOCS --> survive.
+        natural_sep = _collect_trailing_separator(lines, own_body_end, heading_end)
+        trailing = natural_sep if natural_sep else [""]
 
-        # Preserve trailing blank line(s) at end of own body
-        trailing: list[str] = []
-        j = own_body_end - 1
-        while j >= heading_end and j < len(lines) and lines[j].strip() == "":
-            trailing.insert(0, lines[j])
-            j -= 1
-        if not trailing:
-            trailing = [""]
+        # Build new body lines, stripping separator lines from the tail of
+        # new_content to prevent duplication when the agent passes back content
+        # it previously read via get_section (which includes separator lines).
+        raw_lines = (
+            new_content.rstrip("\n").splitlines() if new_content.rstrip("\n") else []
+        )
+        _strip_separator_from_tail(raw_lines, natural_sep)
+
+        body_lines = [""] + raw_lines if raw_lines else []
 
         new_section = heading_lines + body_lines + trailing
         lines[start:own_body_end] = new_section
@@ -774,19 +870,15 @@ class MarkdownDocument:
         heading_end = h.end_line
         heading_lines = lines[start:heading_end]
 
-        new_body = new_content.rstrip("\n")
-        if new_body:
-            body_lines = [""] + new_body.splitlines()
-        else:
-            body_lines = []
+        natural_sep = _collect_trailing_separator(lines, own_body_end, heading_end)
+        trailing = natural_sep if natural_sep else [""]
 
-        trailing: list[str] = []
-        j = own_body_end - 1
-        while j >= heading_end and j < len(lines) and lines[j].strip() == "":
-            trailing.insert(0, lines[j])
-            j -= 1
-        if not trailing:
-            trailing = [""]
+        raw_lines = (
+            new_content.rstrip("\n").splitlines() if new_content.rstrip("\n") else []
+        )
+        _strip_separator_from_tail(raw_lines, natural_sep)
+
+        body_lines = [""] + raw_lines if raw_lines else []
 
         new_section = heading_lines + body_lines + trailing
         new_lines = lines[:start] + new_section + lines[own_body_end:]
