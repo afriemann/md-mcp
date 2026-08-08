@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver.server import MCPServer
 
 from md_mcp.document import MarkdownDocument
 
-mcp = FastMCP("md-mcp")
+mcp = MCPServer("md-mcp")
 
 # ---------------------------------------------------------------------------
 # Path guard
