@@ -9,7 +9,7 @@ license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "anyio>=4.14.2,<5",
-    "mcp[cli]>=1.27.2,<2",
+    "mcp[cli]>=2.0.0,<3",
     "mistletoe==1.6.0",
 ]
 
