@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "anyio>=4.0,<5",
     "mcp[cli]>=1.27.2,<2",
-    "mistletoe==1.5.1",
+    "mistletoe==1.6.0",
 ]
 
 [project.optional-dependencies]
