@@ -32,9 +32,10 @@ def _check_path(file_path: str) -> Path:
     relative to at least one allowed root.
     """
     resolved = Path(file_path).expanduser().resolve()
-    if _allowed_roots is not None:
-        if not any(resolved.is_relative_to(root) for root in _allowed_roots):
-            raise PermissionError(f"path not under any allowed root: {file_path}")
+    if _allowed_roots is not None and not any(
+        resolved.is_relative_to(root) for root in _allowed_roots
+    ):
+        raise PermissionError(f"path not under any allowed root: {file_path}")
     return resolved
 
 
@@ -45,11 +46,11 @@ def _check_path(file_path: str) -> Path:
 
 @mcp.tool()
 def get_index(file_path: str) -> dict[str, Any]:
-    """Return the section index of a Markdown file as a nested tree.
+    """Call this first to discover the section structure of a Markdown file and obtain valid `path` values required by all other tools (get_section, search_sections, add_section, replace_section, patch_section, delete_section).
 
-    Each node: {"heading": str, "level": int, "path": str, "children": [...]}
-    The "path" field is the dot-separated address used by all other tools.
-    Literal dots in heading text are represented as \\. in path strings.
+    Returns a nested tree: {"heading": str, "level": int, "path": str, "children": [...]}.
+    `path` is the dot-separated section address used by every other tool in this server.
+    Literal dots in heading text are escaped as \\. in path strings.
     """
     try:
         doc = MarkdownDocument(str(_check_path(file_path)))
@@ -70,7 +71,7 @@ def get_section(
     path: str,
     depth: int | None = None,
 ) -> str:
-    """Return the heading line(s) and body of the section at `path`.
+    """Use to read the current content of a section before editing it. Call get_index first to obtain a valid `path`.
 
     `path` is a dot-separated heading path, e.g. "My README.Installation.Prerequisites".
     Matching is case-insensitive. Returns the raw Markdown text of the section.
@@ -105,29 +106,19 @@ def search_sections(
     query: str,
     case_sensitive: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search all section bodies for lines matching `query` (regex).
+    """Use to find sections whose body contains a regex pattern. Returns one result object per matching section, with line numbers and matched text.
 
-    Returns a list of match objects — one per section that contains at least
-    one hit — in file order:
+    NOTE: heading text is NOT searched — only section bodies. To find a section by heading,
+    call get_index and scan the returned paths instead.
 
-        [
-          {
-            "path": "Root.Child",
-            "matches": [
-              {"line": 12, "text": "...the matching line text..."},
-              ...
-            ]
-          },
-          ...
-        ]
+    `query`: Python regex. `case_sensitive` defaults to False (case-insensitive).
 
+    Each result: {"path": "Root.Child", "matches": [{"line": 12, "text": "..."}]}.
+    The "path" in each result is a valid input for get_section, replace_section, patch_section, and delete_section.
     `line` is the 1-based line number within the file.
     Only each section's own body is searched (not its children), so results
     are never duplicated across parent and child sections.
-    Note: heading text is not searched — only section bodies. If the term you
-    are looking for may appear in a heading, call ``get_index`` first and scan
-    the returned paths.
-    `query` is a Python regex; raises an error string if the pattern is invalid.
+    Raises an error string if the pattern is invalid.
     """
     import re as _re
 
@@ -155,14 +146,14 @@ def add_section(
     before: str | None = None,
     after: str | None = None,
 ) -> str:
-    """Insert a new section into a Markdown file.
+    """Use to add a section that does not yet exist. To update an existing section's body, use replace_section instead. Prefer this over a generic file-write tool when the Markdown file has section structure.
 
-    `heading` must start with 1–6 '#' characters followed by a space, e.g. "## New Section".
-    `content` is the body text (no heading line).
-    Placement: exactly one of `under`, `before`, `after` may be set, or all None to append.
-      - `under`: insert as the last child of the named section
-      - `before`: insert immediately before the named section
-      - `after`: insert immediately after the named section (and all its children)
+    Call get_index first to discover valid `path` values for the placement parameters.
+
+    `heading`: must start with 1–6 '#' characters followed by a space, e.g. "## New Section".
+    `content`: body text only — do NOT include the heading line.
+    Placement: set exactly one of `under` (as last child), `before`, or `after`; omit all to append at end.
+    Values for `under`, `before`, and `after` must come from get_index.
     Returns "ok" on success.
     """
     try:
@@ -183,9 +174,12 @@ def add_section(
 
 @mcp.tool()
 def replace_section(file_path: str, path: str, new_content: str) -> str:
-    """Replace the body of a section, preserving its heading line.
+    """Use to update the body of an existing section without touching its heading. Prefer this over a generic file-write tool when the Markdown file has section structure.
 
-    The heading line is kept unchanged; only the body text is replaced.
+    Recommended workflow: get_index → (optionally get_section to read current content) → patch_section to preview the diff → replace_section to commit.
+
+    `path`: dot-separated section address obtained from get_index (e.g. "README.Installation").
+    `new_content`: replacement body text — do NOT include the heading line.
     Returns "ok" on success.
     """
     try:
@@ -206,10 +200,12 @@ def replace_section(file_path: str, path: str, new_content: str) -> str:
 
 @mcp.tool()
 def patch_section(file_path: str, path: str, new_content: str) -> str:
-    """Return a unified diff of what replace_section would do, without writing.
+    """Dry-run preview of replace_section — returns a unified diff without writing to the file. Call this before replace_section to confirm the change is correct.
 
-    Useful for previewing changes before committing them.
-    Returns the unified diff as a string (empty string if no changes).
+    An empty return string means new_content is identical to the current section body (no change would be made).
+
+    `path`: dot-separated section address from get_index.
+    `new_content`: the replacement body text you intend to pass to replace_section.
     """
     try:
         doc = MarkdownDocument(str(_check_path(file_path)))
@@ -232,10 +228,13 @@ def delete_section(
     path: str,
     include_children: bool = True,
 ) -> str:
-    """Delete a section from a Markdown file.
+    """Use to permanently remove a section. Prefer this over a generic file-write tool when the Markdown file has section structure. To clear a section's body while keeping its heading, use replace_section with empty content instead.
 
-    With include_children=True (default): deletes the heading, its body, and all child sections.
-    With include_children=False: deletes only the heading and its own body; child sections are promoted.
+    Call get_index first to obtain a valid `path`.
+
+    `path`: dot-separated section address from get_index.
+    `include_children=True` (default): deletes the heading, its body, and all child sections.
+    `include_children=False`: deletes only the heading and its own body; child sections are promoted to the parent level.
     Returns "ok" on success.
     """
     try:
@@ -321,7 +320,7 @@ async def _run_with_graceful_shutdown() -> None:
 
 def main() -> None:
     """Run the md-mcp MCP server over stdio."""
-    global _allowed_roots  # noqa: PLW0603
+    global _allowed_roots  # global assignment is intentional — CLI sets allowed roots
 
     parser = argparse.ArgumentParser(
         description="md-mcp: MCP server for Markdown section editing"
