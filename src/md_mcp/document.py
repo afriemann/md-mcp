@@ -695,8 +695,24 @@ class MarkdownDocument:
     ) -> None:
         """Insert a new section into the document and write to file.
 
-        Exactly one of ``under``, ``before``, ``after`` may be set, or all
-        ``None`` to append at end of document.
+        At most one of ``before`` or ``after`` may be set.  ``under`` may be
+        combined with ``before`` or ``after`` as a redundant parent
+        confirmation: when both are supplied, ``under`` is validated against
+        the parent implied by the sibling path, then stripped so placement
+        proceeds with ``before``/``after`` alone.
+
+        Valid combinations::
+
+            # append at end
+            add_section("## New", "body")
+            # insert as last child of a section
+            add_section("## New", "body", under="Root.Parent")
+            # insert before a sibling (under is optional and validated)
+            add_section("## New", "body", before="Root.Parent.Sibling")
+            add_section("## New", "body", under="Root.Parent", before="Root.Parent.Sibling")
+            # insert after a sibling
+            add_section("## New", "body", after="Root.Parent.Sibling")
+            add_section("## New", "body", under="Root.Parent", after="Root.Parent.Sibling")
 
         ``heading`` must start with one or more ``#`` characters followed by
         a space, e.g. ``"## New Section"``.
@@ -711,9 +727,14 @@ class MarkdownDocument:
                 f"got {heading!r}"
             )
 
-        anchors = [a for a in (under, before, after) if a is not None]
-        if len(anchors) > 1:
-            raise ValueError("At most one of under/before/after may be specified.")
+        if before is not None and after is not None:
+            raise ValueError("before and after cannot both be specified.")
+
+        # Determine whether we need to validate under against the sibling path.
+        # Validation is deferred to after headings are parsed (we need indices).
+        _check_under_consistency = under is not None and (
+            before is not None or after is not None
+        )
 
         # Build the new block to insert (heading line + optional body)
         block_lines = [heading]
@@ -728,6 +749,28 @@ class MarkdownDocument:
         lines = self._read_lines()
         parsed = _ParsedDocument.from_text("\n".join(lines))
         headings = parsed.headings
+
+        # Validate and strip under when combined with before/after.
+        if _check_under_consistency:
+            assert under is not None  # narrowing for type checker
+            sibling = before if before is not None else after
+            assert sibling is not None
+            segs = _split_path(sibling)
+            if len(segs) < 2:
+                raise ValueError(
+                    f"under={under!r} is redundant: {sibling!r} is a root-level "
+                    "section with no parent heading. Remove under= and retry."
+                )
+            parent_path = ".".join(_escape_segment(s) for s in segs[:-1])
+            under_idx = _resolve_path(headings, under)
+            parent_idx = _resolve_path(headings, parent_path)
+            if under_idx != parent_idx:
+                raise ValueError(
+                    f"under={under!r} does not match the parent of {sibling!r} "
+                    f"— expected {parent_path!r}. Remove under= and retry."
+                )
+            # under is consistent — strip it; proceed with before/after alone
+            under = None
 
         if under is None and before is None and after is None:
             # Append at end of document
