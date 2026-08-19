@@ -229,10 +229,117 @@ class TestAddSection:
             doc.add_section("## New", "body", under="Root.NonExistent")
 
     def test_multiple_anchors_raises_value_error(self, tmp_path: Path) -> None:
+        # spec: openspec/changes/add-section-placement-and-error-surfacing/specs/tools/spec.md
         p = write_md(tmp_path, "# Root\n\n## A\n\n## B\n")
         doc = MarkdownDocument(p)
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match="before and after cannot both be specified"
+        ):
             doc.add_section("## New", "body", before="Root.A", after="Root.B")
+
+    def test_under_plus_before_inserts_before_the_sibling(self, tmp_path: Path) -> None:
+        """under + before: placement must be identical to before alone.
+
+        spec: openspec/changes/add-section-placement-and-error-surfacing/specs/tools/spec.md
+        """
+        content = (
+            "# Root\n\n## Parent\n\nParent body\n\n### Existing Child\n\nChild body\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section(
+            "### New Child",
+            "New body",
+            under="Root.Parent",
+            before="Root.Parent.Existing Child",
+        )
+        text = p.read_text(encoding="utf-8")
+        assert text.index("### New Child") < text.index("### Existing Child")
+        assert "\n\n\n" not in text
+
+    def test_under_plus_after_inserts_after_the_sibling(self, tmp_path: Path) -> None:
+        """under + after: placement must be identical to after alone.
+
+        spec: openspec/changes/add-section-placement-and-error-surfacing/specs/tools/spec.md
+        """
+        content = (
+            "# Root\n\n## Parent\n\nParent body\n\n### Existing Child\n\nChild body\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        doc.add_section(
+            "### New Child",
+            "New body",
+            under="Root.Parent",
+            after="Root.Parent.Existing Child",
+        )
+        text = p.read_text(encoding="utf-8")
+        assert text.index("### New Child") > text.index("### Existing Child")
+        assert "\n\n\n" not in text
+
+    def test_under_inconsistent_with_before_raises_value_error(
+        self, tmp_path: Path
+    ) -> None:
+        """under pointing to a non-parent section raises ValueError.
+
+        spec: openspec/changes/add-section-placement-and-error-surfacing/specs/tools/spec.md
+        """
+        content = (
+            "# Root\n\n"
+            "## Section A\n\nBody A\n\n"
+            "### Child A\n\nChild body\n\n"
+            "## Section B\n\nBody B\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        with pytest.raises(ValueError, match="does not match the parent"):
+            doc.add_section(
+                "### New",
+                "body",
+                under="Root.Section B",  # wrong parent
+                before="Root.Section A.Child A",
+            )
+
+    def test_under_inconsistent_with_after_raises_value_error(
+        self, tmp_path: Path
+    ) -> None:
+        """under pointing to a non-parent section also raises ValueError when combined with after.
+
+        spec: openspec/changes/add-section-placement-and-error-surfacing/specs/tools/spec.md
+        """
+        content = (
+            "# Root\n\n"
+            "## Section A\n\nBody A\n\n"
+            "### Child A\n\nChild body\n\n"
+            "## Section B\n\nBody B\n"
+        )
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        with pytest.raises(ValueError, match="does not match the parent"):
+            doc.add_section(
+                "### New",
+                "body",
+                under="Root.Section B",  # wrong parent
+                after="Root.Section A.Child A",
+            )
+
+    def test_under_with_root_level_before_raises_value_error(
+        self, tmp_path: Path
+    ) -> None:
+        """under + a root-level before target raises ValueError (no parent heading exists).
+
+        spec: openspec/changes/add-section-placement-and-error-surfacing/specs/tools/spec.md
+        """
+        content = "# Root\n\nContent\n\n# Other\n\nOther content\n"
+        p = write_md(tmp_path, content)
+        doc = MarkdownDocument(p)
+        with pytest.raises(ValueError, match="root-level section"):
+            doc.add_section(
+                "# New",
+                "",
+                under="Root",
+                before="Other",
+            )
 
     def test_add_section_writes_to_file(self, tmp_path: Path) -> None:
         p = write_md(tmp_path, "# Root\n\nContent\n")

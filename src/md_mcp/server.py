@@ -52,17 +52,8 @@ def get_index(file_path: str) -> dict[str, Any]:
     `path` is the dot-separated section address used by every other tool in this server.
     Literal dots in heading text are escaped as \\. in path strings.
     """
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        return doc.get_index()
-    except PermissionError:
-        return {"error": f"access denied: {file_path}"}
-    except FileNotFoundError:
-        return {"error": f"file not found: {file_path}"}
-    except (UnicodeDecodeError, UnicodeError):
-        return {"error": f"file is not valid UTF-8: {file_path}"}
-    except OSError as e:
-        return {"error": f"I/O error: {e.strerror}"}
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    return doc.get_index()
 
 
 @mcp.tool()
@@ -85,19 +76,8 @@ def get_section(
 
     Raises an error string if the path does not exist.
     """
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        return doc.get_section(path, depth=depth)
-    except PermissionError:
-        return f"Error: access denied: {file_path}"
-    except FileNotFoundError:
-        return f"Error: file not found: {file_path}"
-    except KeyError as e:
-        return f"Error: {e}"
-    except ValueError as e:
-        return f"Error: {e}"
-    except OSError as e:
-        return f"Error: I/O error: {e.strerror}"
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    return doc.get_section(path, depth=depth)
 
 
 @mcp.tool()
@@ -120,21 +100,8 @@ def search_sections(
     are never duplicated across parent and child sections.
     Raises an error string if the pattern is invalid.
     """
-    import re as _re
-
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        return doc.search_sections(query, case_sensitive=case_sensitive)
-    except FileNotFoundError:
-        return [{"error": f"file not found: {file_path}"}]
-    except PermissionError:
-        return [{"error": f"access denied: {file_path}"}]
-    except (UnicodeDecodeError, UnicodeError):
-        return [{"error": f"file is not valid UTF-8: {file_path}"}]
-    except OSError as e:
-        return [{"error": f"I/O error: {e.strerror}"}]
-    except _re.error as e:
-        return [{"error": f"invalid regex: {e}"}]
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    return doc.search_sections(query, case_sensitive=case_sensitive)
 
 
 @mcp.tool()
@@ -152,24 +119,17 @@ def add_section(
 
     `heading`: must start with 1–6 '#' characters followed by a space, e.g. "## New Section".
     `content`: body text only — do NOT include the heading line.
-    Placement: set exactly one of `under` (as last child), `before`, or `after`; omit all to append at end.
+    Placement: set at most one of `before` or `after`; omit all to append at end.
+    `under` (as last child) may be used alone or combined with `before`/`after` as a
+    redundant parent confirmation — when combined, `under` is validated against the parent
+    implied by the sibling path, then ignored for placement.
+    `before` and `after` cannot be set at the same time.
     Values for `under`, `before`, and `after` must come from get_index.
     Returns "ok" on success.
     """
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        doc.add_section(heading, content, under=under, before=before, after=after)
-        return "ok"
-    except PermissionError:
-        return f"Error: access denied: {file_path}"
-    except FileNotFoundError:
-        return f"Error: file not found: {file_path}"
-    except KeyError as e:
-        return f"Error: {e}"
-    except ValueError as e:
-        return f"Error: {e}"
-    except OSError as e:
-        return f"Error: I/O error: {e.strerror}"
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    doc.add_section(heading, content, under=under, before=before, after=after)
+    return "ok"
 
 
 @mcp.tool()
@@ -182,20 +142,9 @@ def replace_section(file_path: str, path: str, new_content: str) -> str:
     `new_content`: replacement body text — do NOT include the heading line.
     Returns "ok" on success.
     """
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        doc.replace_section(path, new_content)
-        return "ok"
-    except PermissionError:
-        return f"Error: access denied: {file_path}"
-    except FileNotFoundError:
-        return f"Error: file not found: {file_path}"
-    except KeyError as e:
-        return f"Error: {e}"
-    except ValueError as e:
-        return f"Error: {e}"
-    except OSError as e:
-        return f"Error: I/O error: {e.strerror}"
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    doc.replace_section(path, new_content)
+    return "ok"
 
 
 @mcp.tool()
@@ -207,19 +156,8 @@ def patch_section(file_path: str, path: str, new_content: str) -> str:
     `path`: dot-separated section address from get_index.
     `new_content`: the replacement body text you intend to pass to replace_section.
     """
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        return doc.patch_section(path, new_content)
-    except PermissionError:
-        return f"Error: access denied: {file_path}"
-    except FileNotFoundError:
-        return f"Error: file not found: {file_path}"
-    except KeyError as e:
-        return f"Error: {e}"
-    except ValueError as e:
-        return f"Error: {e}"
-    except OSError as e:
-        return f"Error: I/O error: {e.strerror}"
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    return doc.patch_section(path, new_content)
 
 
 @mcp.tool()
@@ -237,20 +175,9 @@ def delete_section(
     `include_children=False`: deletes only the heading and its own body; child sections are promoted to the parent level.
     Returns "ok" on success.
     """
-    try:
-        doc = MarkdownDocument(str(_check_path(file_path)))
-        doc.delete_section(path, include_children=include_children)
-        return "ok"
-    except PermissionError:
-        return f"Error: access denied: {file_path}"
-    except FileNotFoundError:
-        return f"Error: file not found: {file_path}"
-    except KeyError as e:
-        return f"Error: {e}"
-    except ValueError as e:
-        return f"Error: {e}"
-    except OSError as e:
-        return f"Error: I/O error: {e.strerror}"
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    doc.delete_section(path, include_children=include_children)
+    return "ok"
 
 
 # ---------------------------------------------------------------------------
