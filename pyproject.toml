@@ -11,6 +11,7 @@ dependencies = [
     "anyio>=4.14.2,<5",
     "mcp[cli]>=2.0.0,<3",
     "mistletoe==1.6.0",
+    "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +21,7 @@ dev = [
     "pytest-cov",
     "ruff",
     "mypy",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.pytest.ini_options]

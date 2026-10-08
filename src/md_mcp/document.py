@@ -18,6 +18,8 @@ from typing import Any
 from mistletoe.block_token import Document as MistletoeDocument
 from mistletoe.block_token import Heading, SetextHeading
 from mistletoe.span_token import RawText
+import yaml
+
 
 # ---------------------------------------------------------------------------
 # Module-level AST cache: {filepath_str: (mtime_float, parsed_data)}
@@ -92,15 +94,174 @@ class _HeadingInfo:
         self.end_line = end_line  # 0-indexed, exclusive (past heading markup)
 
 
+FRONTMATTER_PATH = "frontmatter"
+_FRONTMATTER_DELIM = "---"
+_TEMPLATE_MAX_LINES = 20  # a {{ ... }} action may span at most this many lines
+_TEMPLATE_PLACEHOLDER = "__TEMPLATE__"
+_MASKABLE_LINE_RE = re.compile(r"^\s*(?:#|=+\s*$|-+\s*$)")
+_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+# Characters Python's str.splitlines() (and so mistletoe) treats as line
+# breaks besides "\n"; they are neutralised before parsing so that parser line
+# numbers always equal "\n"-split line indices.
+_EXOTIC_BREAK_RE = re.compile("[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]|\r(?!\n)")
+
+
+def _template_spans(lines: list[str]) -> list[tuple[int, int, int, int]]:
+    """Locate ``{{ ... }}`` template actions as ``(line, col, end_line, end_col)``.
+
+    An action may span several lines but never a blank line or more than
+    ``_TEMPLATE_MAX_LINES`` lines; an unbalanced ``{{`` yields no span.
+    Lines inside fenced code blocks are skipped.
+    """
+    spans: list[tuple[int, int, int, int]] = []
+    fence: str | None = None
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        fm = _FENCE_RE.match(line)
+        if fm:
+            marker = fm.group(1)
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            i += 1
+            continue
+        if fence is not None:
+            i += 1
+            continue
+        col = 0
+        while True:
+            start = line.find("{{", col)
+            if start == -1:
+                break
+            end = line.find("}}", start + 2)
+            end_line = i
+            if end == -1:
+                j = i + 1
+                while j < n and j - i <= _TEMPLATE_MAX_LINES and lines[j].strip():
+                    end = lines[j].find("}}")
+                    if end != -1:
+                        end_line = j
+                        break
+                    j += 1
+            if end == -1:
+                col = start + 2
+                continue
+            spans.append((i, start, end_line, end + 2))
+            i = end_line
+            line = lines[i]
+            col = end + 2
+        i += 1
+    return spans
+
+
+def _mask_templates(lines: list[str]) -> list[str]:
+    """Replace every template action by a placeholder scalar."""
+    out = list(lines)
+    for i, start, j, end in reversed(_template_spans(lines)):
+        out[i] = out[i][:start] + _TEMPLATE_PLACEHOLDER + out[j][end:]
+        del out[i + 1 : j + 1]
+    return out
+
+
+def _yaml_state(body_lines: list[str]) -> tuple[str, str]:
+    """Classify a frontmatter body: ``"mapping"``, ``"other"`` or ``"error"``.
+
+    Template actions are replaced by a placeholder scalar first.  The second
+    element is the parser's error message for ``"error"``.
+    """
+    text = "\n".join(_mask_templates([ln.rstrip("\r") for ln in body_lines]))
+    try:
+        data = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError) as e:
+        return "error", str(e)
+    return ("mapping" if isinstance(data, dict) else "other"), ""
+
+
+def _find_frontmatter(lines: list[str]) -> tuple[int, int] | None:
+    """Return ``(0, close)`` — 0-indexed line numbers of the opening and
+    closing ``---`` delimiters — or ``None`` when the file has no frontmatter.
+
+    Rule: the first line is exactly ``---``, a later line is exactly ``---``,
+    and the lines between them are a YAML mapping (template actions count as
+    scalars) — or fail to parse only because they contain ``{{`` template
+    syntax.  Anything else (e.g. a document that opens with a horizontal rule
+    and has another later) is *not* frontmatter and is parsed as Markdown.
+    """
+    if not lines or lines[0].rstrip("\r") != _FRONTMATTER_DELIM:
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].rstrip("\r") == _FRONTMATTER_DELIM:
+            body = lines[1:i]
+            state, _ = _yaml_state(body)
+            if state == "mapping":
+                return 0, i
+            if state == "error" and any("{{" in ln for ln in body):
+                return 0, i
+            return None
+    return None
+
+
+def _is_frontmatter_path(path: str) -> bool:
+    return path.strip().lower() == FRONTMATTER_PATH
+
+
+def _check_frontmatter_edit(old_body: list[str], new_body: list[str]) -> None:
+    """Raise ``ValueError`` unless *new_body* is acceptable frontmatter.
+
+    It must be a YAML mapping (template actions count as scalars).  A body
+    that could not be parsed before the edit only because of template syntax
+    is not re-validated.
+    """
+    state, err = _yaml_state(new_body)
+    if state == "mapping":
+        return
+    if state == "error":
+        if _yaml_state(old_body)[0] == "error" and any("{{" in ln for ln in new_body):
+            return
+        raise ValueError(f"frontmatter is not valid YAML: {err}")
+    raise ValueError("frontmatter must be a YAML mapping (key: value lines)")
+
+
+def _mask_for_parse(lines: list[str], fm: tuple[int, int] | None) -> str:
+    """Build the text handed to the Markdown parser.
+
+    Line numbers are preserved exactly.  Frontmatter lines are blanked so they
+    are never parsed as a heading, and continuation lines of multi-line
+    ``{{ ... }}`` template actions that could look like a heading or setext
+    underline (``#``, ``===``, ``---``) are replaced by plain text.
+    """
+    masked = list(lines)
+    if fm is not None:
+        for i in range(fm[1] + 1):
+            masked[i] = ""
+    for first, _c, last, _e in _template_spans(masked):
+        for i in range(first + 1, last + 1):
+            if _MASKABLE_LINE_RE.match(masked[i]):
+                masked[i] = "x"
+    return "\n".join(masked)
+
+
 class _ParsedDocument:
     """Cached result of parsing one Markdown file."""
 
-    def __init__(self, headings: list[_HeadingInfo]) -> None:
+    def __init__(
+        self,
+        headings: list[_HeadingInfo],
+        frontmatter: tuple[int, int] | None = None,
+    ) -> None:
         self.headings = headings
+        # (opening delimiter line, closing delimiter line), 0-indexed, or None
+        self.frontmatter = frontmatter
 
     @classmethod
     def from_text(cls, text: str) -> "_ParsedDocument":
-        doc = MistletoeDocument(text)
+        text = _EXOTIC_BREAK_RE.sub(" ", text.replace("\r\n", "\n"))
+        lines = text.split("\n")
+        fm = _find_frontmatter(lines)
+        doc = MistletoeDocument(_mask_for_parse(lines, fm))
         headings: list[_HeadingInfo] = []
         for token in doc.children or []:
             if _is_heading(token):
@@ -112,7 +273,7 @@ class _ParsedDocument:
                         end_line=_heading_end_line(token),
                     )
                 )
-        return cls(headings)
+        return cls(headings, fm)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +313,20 @@ def _split_path(path: str) -> list[str]:
     raw_segments = re.split(r"(?<!\\)\.", path)
     # Unescape \\. → . in each segment
     return [seg.replace("\\.", ".") for seg in raw_segments]
+
+
+def _heading_paths(headings: list[_HeadingInfo]) -> list[str]:
+    """Return the dot-path of every heading, in heading order."""
+    paths: list[str] = []
+    stack: list[tuple[int, str]] = []  # (level, path)
+    for h in headings:
+        while stack and stack[-1][0] >= h.level:
+            stack.pop()
+        seg = _escape_segment(h.text)
+        path = f"{stack[-1][1]}.{seg}" if stack else seg
+        paths.append(path)
+        stack.append((h.level, path))
+    return paths
 
 
 def _build_index_tree(headings: list[_HeadingInfo]) -> list[dict[str, Any]]:
@@ -385,7 +560,40 @@ def _section_text(
 # Public class
 # ---------------------------------------------------------------------------
 
+_SCOPES = frozenset({"body", "headings", "both"})
 _HEADING_LINE_RE = re.compile(r"^#{1,6}(?:\s|$)")
+
+
+def _split_lines(text: str) -> list[str]:
+    """Split on ``\\n`` only; a trailing newline does not yield an empty line."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _nl(items: list[str], cr: str) -> list[str]:
+    """Give newly created lines the file's line-ending suffix (``cr``)."""
+    return [x + cr for x in items]
+
+
+def _dominant_cr(lines: list[str]) -> str:
+    """``"\\r"`` when most lines of the file end in CRLF, else ``""``."""
+    crlf = sum(1 for ln in lines if ln.endswith("\r"))
+    return "\r" if lines and crlf * 2 > len(lines) else ""
+
+
+def _replace_frontmatter(
+    lines: list[str], fm: tuple[int, int], new_content: str, cr: str
+) -> list[str]:
+    """Return *lines* with the frontmatter body replaced; delimiters kept.
+
+    Raises ``ValueError`` if the new body is not a valid YAML mapping.
+    """
+    body = new_content.replace("\r\n", "\n").rstrip("\n")
+    new_body = body.split("\n") if body else []
+    _check_frontmatter_edit(lines[fm[0] + 1 : fm[1]], new_body)
+    return lines[: fm[0] + 1] + _nl(new_body, cr) + lines[fm[1] :]
 
 
 def _strip_leading_heading(new_content: str) -> str:
@@ -423,8 +631,27 @@ def _new_content_has_child_headings(new_content: str) -> bool:
     the full section span (heading + body + children) rather than only the own
     body.  Called after ``_strip_leading_heading`` has already removed the
     section's own heading line, so any remaining heading belongs to a child.
+
+    Lines inside fenced code blocks and inside multi-line ``{{ ... }}``
+    template actions are text, not headings.
     """
-    return any(_HEADING_LINE_RE.match(line) for line in new_content.splitlines())
+    lines = new_content.replace("\r\n", "\n").split("\n")
+    for first, _c, last, _e in _template_spans(lines):
+        for i in range(first + 1, last + 1):
+            lines[i] = "x"
+    fence: str | None = None
+    for line in lines:
+        stripped = line.lstrip()
+        marker = stripped[:3]
+        if marker in ("```", "~~~") and len(line) - len(stripped) < 4:
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence is None and _HEADING_LINE_RE.match(line):
+            return True
+    return False
 
 
 def _peek_html_comment_backward(
@@ -517,7 +744,11 @@ def _strip_separator_from_tail(
     Returns the (possibly shorter) list; the input list is mutated.
     """
     sep_to_strip = list(natural_sep)
-    while sep_to_strip and raw_lines and raw_lines[-1] == sep_to_strip[-1]:
+    while (
+        sep_to_strip
+        and raw_lines
+        and raw_lines[-1].rstrip("\r") == sep_to_strip[-1].rstrip("\r")
+    ):
         raw_lines.pop()
         sep_to_strip.pop()
     return raw_lines
@@ -533,11 +764,27 @@ class MarkdownDocument:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _read_raw(self) -> str:
+        """Read the file without any newline translation (byte-faithful)."""
+        with open(self._path, encoding="utf-8", newline="") as f:
+            return f.read()
+
     def _read_text(self) -> str:
-        return self._path.read_text(encoding="utf-8")
+        return self._read_raw().replace("\r\n", "\n")
 
     def _read_lines(self) -> list[str]:
-        return self._path.read_text(encoding="utf-8").splitlines()
+        return _split_lines(self._read_text())
+
+    def _load(self) -> tuple[list[str], bool, bool]:
+        """Return ``(lines, ends_with_newline, last_line_has_cr)``.
+
+        Lines are split on ``"\\n"`` only and keep any trailing ``"\\r"``, so
+        writing them back with ``"\\n".join`` reproduces every byte.
+        """
+        raw = self._read_raw()
+        lines = _split_lines(raw)
+        ends_nl = raw.endswith("\n") or raw == ""
+        return lines, ends_nl, bool(lines and lines[-1].endswith("\r"))
 
     def _parsed(self) -> _ParsedDocument:
         """Return cached parsed document, refreshing on mtime change."""
@@ -558,13 +805,17 @@ class MarkdownDocument:
         with _CACHE_LOCK:
             _CACHE.pop(str(self._path), None)
 
-    def _write_lines(self, lines: list[str]) -> None:
-        content = "\n".join(lines)
-        # Preserve trailing newline if original had it
-        if content and not content.endswith("\n"):
-            content += "\n"
-        self._path.write_text(content, encoding="utf-8")
+    def _write_lines(
+        self, lines: list[str], ends_nl: bool, last_cr: bool = False
+    ) -> None:
+        if lines and not ends_nl and not last_cr and lines[-1].endswith("\r"):
+            lines[-1] = lines[-1][:-1]  # a new final line must not gain a CR
+        content = "\n".join(lines) + ("\n" if ends_nl else "")
+        self._path.write_bytes(content.encode("utf-8"))
         self._invalidate_cache()
+
+    def _frontmatter(self) -> tuple[int, int] | None:
+        return self._parsed().frontmatter
 
     # ------------------------------------------------------------------
     # Public API
@@ -577,12 +828,27 @@ class MarkdownDocument:
         of root-level section nodes.  Each node has:
 
         * ``heading`` (str): heading text
-        * ``level`` (int): heading level (1–6)
+        * ``level`` (int): heading level (1–6); 0 for the frontmatter node
+        * A leading ``{"heading": "frontmatter", "level": 0, ...}`` node is
+          present when the file starts with a ``---`` YAML block.  It is
+          addressed with ``path="frontmatter"`` and takes precedence over a
+          top-level heading that is itself named "frontmatter".
         * ``path`` (str): dot-separated path from root to this node
         * ``children`` (list): child nodes (same structure)
         """
         parsed = self._parsed()
-        return {"sections": _build_index_tree(parsed.headings)}
+        sections = _build_index_tree(parsed.headings)
+        if parsed.frontmatter is not None:
+            sections.insert(
+                0,
+                {
+                    "heading": FRONTMATTER_PATH,
+                    "level": 0,
+                    "path": FRONTMATTER_PATH,
+                    "children": [],
+                },
+            )
+        return {"sections": sections}
 
     def get_section(self, path: str, *, depth: int | None = None) -> str:
         """Return the heading line(s) + body text of the named section.
@@ -596,8 +862,10 @@ class MarkdownDocument:
         ``depth=N`` (N ≥ 1): return heading + body + N levels of descendants.
         """
         parsed = self._parsed()
-        idx = _resolve_path(parsed.headings, path)
         lines = self._read_lines()
+        if parsed.frontmatter is not None and _is_frontmatter_path(path):
+            return "\n".join(lines[parsed.frontmatter[0] + 1 : parsed.frontmatter[1]])
+        idx = _resolve_path(parsed.headings, path)
         return _section_text(parsed.headings, idx, lines, depth=depth)
 
     def search_sections(
@@ -605,8 +873,12 @@ class MarkdownDocument:
         query: str,
         *,
         case_sensitive: bool = False,
+        scope: str = "body",
     ) -> list[dict[str, Any]]:
-        """Search all section bodies for lines matching ``query`` (regex).
+        """Search sections for lines matching ``query`` (regex).
+
+        ``scope``: ``"body"`` (default) searches section bodies, ``"headings"``
+        searches heading text, ``"both"`` does both.
 
         Returns a list of match objects — one per section that contains at
         least one hit — sorted by order of first appearance in the file::
@@ -622,67 +894,147 @@ class MarkdownDocument:
               ...
             ]
 
-        ``line`` is 1-based line number within the file.
+        ``line`` is 1-based line number within the file.  For a heading match
+        ``line`` is the heading's line and ``text`` is the heading text.
         Only the section's *own body* is searched (not its children) so
         results are not duplicated across parent and child sections.
-        Raises ``re.error`` if ``query`` is not a valid regex.
+        Frontmatter lines are searched as the section ``"frontmatter"`` when
+        the scope includes bodies.
+        Raises ``re.error`` if ``query`` is not a valid regex and
+        ``ValueError`` if ``scope`` is unknown.
         """
+        if scope not in _SCOPES:
+            raise ValueError(f"scope must be one of {sorted(_SCOPES)}; got {scope!r}")
         flags = 0 if case_sensitive else re.IGNORECASE
         pattern = re.compile(query, flags)  # raises re.error on invalid query
+        in_body = scope in ("body", "both")
+        in_headings = scope in ("headings", "both")
 
         parsed = self._parsed()
         headings = parsed.headings
         lines = self._read_lines()
-
-        # Build a flat {heading_idx: path} mapping from the index tree
-        idx_to_path: dict[int, str] = {}
-
-        def _walk(
-            nodes: list[dict[str, Any]], heading_list: list[_HeadingInfo]
-        ) -> None:
-            for node in nodes:
-                # Find the heading index by matching start_line from the node path
-                # The node stores path and heading text; we need to map it to an index.
-                # We match by text and level using the tree walk order.
-                node_text = node["heading"]
-                node_path = node["path"]
-                # Find the corresponding index in headings
-                for i, h in enumerate(heading_list):
-                    if h.text == node_text and i not in idx_to_path:
-                        # Verify path prefix matches to avoid ambiguity:
-                        # the path is already unique within the tree walk
-                        idx_to_path[i] = node_path
-                        break
-                _walk(node["children"], heading_list)
-
-        # Rebuild tree to get paths
-        tree = _build_index_tree(headings)
-        _walk(tree, headings)
-
-        # Build flat list of (heading_idx, path, body_start, body_end)
-        # body_end = start of next heading at any level (depth=0 boundary), or EOF
-        sections: list[tuple[int, str, int, int]] = []
-        for i, h in enumerate(headings):
-            path = idx_to_path.get(i, "")
-            body_start = h.end_line  # 0-indexed, first line after heading markup
-            # body_end: start of next heading at any level, or EOF
-            if i + 1 < len(headings):
-                body_end = headings[i + 1].start_line
-            else:
-                body_end = len(lines)
-            sections.append((i, path, body_start, body_end))
+        paths = _heading_paths(headings)
 
         results: list[dict[str, Any]] = []
-        for _idx, path, body_start, body_end in sections:
+
+        if in_body and parsed.frontmatter is not None:
+            fm_matches = [
+                {"line": i + 1, "text": lines[i]}
+                for i in range(parsed.frontmatter[0] + 1, parsed.frontmatter[1])
+                if pattern.search(lines[i])
+            ]
+            if fm_matches:
+                results.append({"path": FRONTMATTER_PATH, "matches": fm_matches})
+
+        for i, h in enumerate(headings):
             matches: list[dict[str, Any]] = []
-            for line_idx in range(body_start, body_end):
-                line_text = lines[line_idx]
-                if pattern.search(line_text):
-                    matches.append({"line": line_idx + 1, "text": line_text})
+            if in_headings and pattern.search(h.text):
+                matches.append({"line": h.start_line + 1, "text": h.text})
+            if in_body:
+                # body: first line after heading markup up to the next heading
+                body_end = (
+                    headings[i + 1].start_line if i + 1 < len(headings) else len(lines)
+                )
+                for line_idx in range(h.end_line, body_end):
+                    if pattern.search(lines[line_idx]):
+                        matches.append({"line": line_idx + 1, "text": lines[line_idx]})
             if matches:
-                results.append({"path": path, "matches": matches})
+                results.append({"path": paths[i], "matches": matches})
 
         return results
+
+    def replace_in_section(
+        self,
+        path: str,
+        old: str,
+        new: str,
+        *,
+        replace_all: bool = False,
+    ) -> str:
+        """Replace exact string ``old`` with ``new`` inside one section body.
+
+        Only the section's own body is considered (heading line and child
+        sections are excluded); for ``path="frontmatter"`` it is the text
+        between the ``---`` delimiters.  The write is byte-exact outside the
+        replaced spans.  Returns the unified diff.
+
+        Raises ``ValueError`` if ``old`` is empty or equals ``new``, is not
+        found, or matches more than once while ``replace_all`` is false, or if
+        a frontmatter edit would produce invalid YAML.  ``KeyError`` if the
+        path does not resolve.  The file is not modified on any error.
+        """
+        if old == "":
+            raise ValueError("old must not be empty")
+        if old == new:
+            raise ValueError("old and new are identical; nothing to replace")
+
+        raw = self._read_raw()
+        parsed = _ParsedDocument.from_text(raw)
+        # Line start offsets within the raw text (split on "\n" only).
+        raw_lines = raw.split("\n")
+        starts: list[int] = []
+        off = 0
+        for ln in raw_lines:
+            starts.append(off)
+            off += len(ln) + 1
+        starts.append(len(raw) + 1)  # sentinel for the end-of-file line
+
+        def offset(line: int) -> int:
+            return min(starts[line], len(raw)) if line < len(starts) else len(raw)
+
+        is_fm = parsed.frontmatter is not None and _is_frontmatter_path(path)
+        if is_fm:
+            assert parsed.frontmatter is not None
+            first, last = parsed.frontmatter[0] + 1, parsed.frontmatter[1]
+        else:
+            idx = _resolve_path(parsed.headings, path)
+            h = parsed.headings[idx]
+            first = h.end_line
+            last = (
+                parsed.headings[idx + 1].start_line
+                if idx + 1 < len(parsed.headings)
+                else len(raw_lines)
+            )
+            # a trailing "" element from a final newline is not a body line
+            if last == len(raw_lines) and raw.endswith("\n"):
+                last -= 1
+        seg_start = offset(first)
+        seg_end = offset(last) if last > first else seg_start
+        segment = raw[seg_start:seg_end]
+
+        count = segment.count(old)
+        if count == 0 and "\n" in old:
+            # Clients send "\n"; retry with the file's CRLF endings.
+            crlf_old = old.replace("\r\n", "\n").replace("\n", "\r\n")
+            if segment.count(crlf_old):
+                old = crlf_old
+                new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+                count = segment.count(old)
+        if count == 0:
+            raise ValueError(f"old text not found in section {path!r}")
+        if count > 1 and not replace_all:
+            raise ValueError(
+                f"old text matches {count} times in section {path!r}; "
+                "add surrounding context to make it unique or pass replace_all=true"
+            )
+        new_segment = segment.replace(old, new)
+        if is_fm:
+            _check_frontmatter_edit(
+                segment.replace("\r\n", "\n").split("\n"),
+                new_segment.replace("\r\n", "\n").split("\n"),
+            )
+        new_raw = raw[:seg_start] + new_segment + raw[seg_end:]
+
+        self._path.write_bytes(new_raw.encode("utf-8"))
+        self._invalidate_cache()
+        return "".join(
+            difflib.unified_diff(
+                raw.replace("\r\n", "\n").splitlines(keepends=True),
+                new_raw.replace("\r\n", "\n").splitlines(keepends=True),
+                fromfile=str(self._path),
+                tofile=str(self._path) + " (patched)",
+            )
+        )
 
     def add_section(
         self,
@@ -721,6 +1073,13 @@ class MarkdownDocument:
         dot-separated heading paths.  Literal dots in heading text are
         represented as ``\\.`` (e.g. ``"Root.v1\\.2\\.3"``).
         """
+        for anchor in (under, before, after):
+            if anchor is not None and _is_frontmatter_path(anchor):
+                if self._frontmatter() is not None:
+                    raise ValueError(
+                        "add_section cannot target the frontmatter block; "
+                        "anchor on a heading path instead."
+                    )
         if not re.match(r"^#{1,6} ", heading):
             raise ValueError(
                 f"heading must start with 1–6 '#' characters followed by a space; "
@@ -736,17 +1095,9 @@ class MarkdownDocument:
             before is not None or after is not None
         )
 
-        # Build the new block to insert (heading line + optional body)
-        block_lines = [heading]
-        if content:
-            body = content.rstrip("\n")
-            block_lines.append("")  # blank line after heading
-            block_lines.extend(body.splitlines())
-        # Ensure trailing blank line for separation
-        block_lines.append("")
-
         # Re-read file right before writing to avoid races
-        lines = self._read_lines()
+        lines, ends_nl, last_cr = self._load()
+        cr = _dominant_cr(lines)
         parsed = _ParsedDocument.from_text("\n".join(lines))
         headings = parsed.headings
 
@@ -772,60 +1123,55 @@ class MarkdownDocument:
             # under is consistent — strip it; proceed with before/after alone
             under = None
 
+        # Build the new block to insert (heading line + optional body)
+        block_lines = [heading]
+        if content:
+            body = content.replace("\r\n", "\n").rstrip("\n")
+            block_lines.append("")  # blank line after heading
+            block_lines.extend(body.split("\n"))
+        block_lines = _nl(block_lines, cr)
+        # Trailing blank line separates the block from what follows; it is
+        # dropped again below when the block ends the file.
+        block_lines.append(cr)
+
+        def insert_block(at: int, leading_blank: bool) -> None:
+            block = ([cr] if leading_blank else []) + block_lines
+            if at >= len(lines):
+                block = block[:-1]  # nothing follows: no separator
+            lines[at:at] = block
+
         if under is None and before is None and after is None:
-            # Append at end of document
-            # Ensure at least one blank line separator from existing content
-            insert_at = len(lines)
-            if lines and lines[-1].strip() != "":
-                lines.append("")
-            lines.extend(block_lines)
+            # Append at end of document, separated by one blank line
+            insert_block(len(lines), bool(lines and lines[-1].strip() != ""))
         elif before is not None:
             idx = _resolve_path(headings, before)
-            h = headings[idx]
-            insert_at = h.start_line
+            insert_at = headings[idx].start_line
             # Collapse any run of blank lines immediately before the target
             # heading down to at most one, to avoid double blank separators.
             end_of_blanks = insert_at
             while insert_at > 0 and lines[insert_at - 1].strip() == "":
                 insert_at -= 1
-            # Remove the run of blank lines before the target heading.
             # NOTE: if the file starts with blank lines and the target heading is the
             # first heading, insert_at will reach 0 and those leading blanks will be
             # removed as a side effect. This is acceptable because leading blank lines
             # have no meaning in standard Markdown.
             del lines[insert_at:end_of_blanks]
-            # Insert exactly one blank separator before the new block (unless
-            # inserting at the very start of the file)
-            if insert_at > 0:
-                block_lines = [""] + block_lines
-            lines[insert_at:insert_at] = block_lines
-        elif after is not None:
-            idx = _resolve_path(headings, after)
-            # Insert after the entire section (including children)
-            _, section_end = _section_lines(headings, idx, lines, depth=None)
-            insert_at = section_end
-            # Find where trailing blanks start
-            while insert_at > 0 and lines[insert_at - 1].strip() == "":
-                insert_at -= 1
-            # Remove the trailing blank lines that were already there
-            del lines[insert_at:section_end]
-            # Insert with exactly one leading blank separator
-            lines[insert_at:insert_at] = [""] + block_lines
+            insert_block(insert_at, insert_at > 0)
         else:
-            # under: insert as last child of the target section
-            assert under is not None
-            idx = _resolve_path(headings, under)
+            # after: insert after the whole target section (incl. children);
+            # under: insert as last child of the target section.
+            anchor = after if after is not None else under
+            assert anchor is not None
+            idx = _resolve_path(headings, anchor)
             _, section_end = _section_lines(headings, idx, lines, depth=None)
             insert_at = section_end
-            # Find where trailing blanks start
             while insert_at > 0 and lines[insert_at - 1].strip() == "":
                 insert_at -= 1
-            # Remove the trailing blank lines that were already there
+            # Replace the trailing blank lines with exactly one separator
             del lines[insert_at:section_end]
-            # Insert with exactly one leading blank separator
-            lines[insert_at:insert_at] = [""] + block_lines
+            insert_block(insert_at, True)
 
-        self._write_lines(lines)
+        self._write_lines(lines, ends_nl, last_cr)
 
     def replace_section(self, path: str, new_content: str) -> None:
         """Replace the body of a section, preserving the heading line.
@@ -840,45 +1186,18 @@ class MarkdownDocument:
         ``###### …``), that line is silently stripped so the result is
         identical to passing body-only content.  This handles the common case
         where an agent includes the heading line in the replacement text.
+
+        ``path="frontmatter"`` replaces the YAML between the ``---`` delimiters.
+        Bytes outside the replaced span (line endings, trailing blank lines,
+        a missing final newline) are preserved.
         """
-        new_content = _strip_leading_heading(new_content)
         # Re-read right before write
-        lines = self._read_lines()
+        lines, ends_nl, last_cr = self._load()
         parsed = _ParsedDocument.from_text("\n".join(lines))
-        idx = _resolve_path(parsed.headings, path)
-        h = parsed.headings[idx]
-
-        # If new_content contains child headings, the agent is supplying a full
-        # section replacement (heading + body + children).  Use depth=None so
-        # the entire existing span (including children) is replaced atomically.
-        # Otherwise use depth=0 to touch only the own body and leave children intact.
-        has_children = _new_content_has_child_headings(new_content)
-        depth: int | None = None if has_children else 0
-        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=depth)
-
-        # heading_end_line is where the body begins (after heading markup)
-        heading_end = h.end_line  # exclusive, 0-indexed
-        heading_lines = lines[start:heading_end]
-
-        # Collect the separator: blank lines and HTML comment blocks that sit
-        # between this section's content and the next heading.  These are
-        # preserved verbatim so markers like <!-- BEGIN_TF_DOCS --> survive.
-        natural_sep = _collect_trailing_separator(lines, own_body_end, heading_end)
-        trailing = natural_sep if natural_sep else [""]
-
-        # Build new body lines, stripping separator lines from the tail of
-        # new_content to prevent duplication when the agent passes back content
-        # it previously read via get_section (which includes separator lines).
-        raw_lines = (
-            new_content.rstrip("\n").splitlines() if new_content.rstrip("\n") else []
+        new_lines = _replaced_lines(
+            lines, parsed, path, new_content, _dominant_cr(lines)
         )
-        _strip_separator_from_tail(raw_lines, natural_sep)
-
-        body_lines = [""] + raw_lines if raw_lines else []
-
-        new_section = heading_lines + body_lines + trailing
-        lines[start:own_body_end] = new_section
-        self._write_lines(lines)
+        self._write_lines(new_lines, ends_nl, last_cr)
 
     def patch_section(self, path: str, new_content: str) -> str:
         """Return a unified diff of what ``replace_section`` would do.
@@ -893,50 +1212,19 @@ class MarkdownDocument:
         identical to passing body-only content.  This handles the common case
         where an agent includes the heading line in the replacement text.
         """
-        new_content = _strip_leading_heading(new_content)
-        # Get current content
         original_text = self._read_text()
-        original_lines = original_text.splitlines(keepends=True)
-
-        # Simulate replace_section by working on the current state
-        lines = self._read_lines()
-        parsed = _ParsedDocument.from_text("\n".join(lines))
-        idx = _resolve_path(parsed.headings, path)
-        h = parsed.headings[idx]
-        # If new_content contains child headings, use depth=None to include the
-        # full existing span in the diff; otherwise depth=0 so child sections
-        # do not appear as removed lines.
-        has_children = _new_content_has_child_headings(new_content)
-        depth: int | None = None if has_children else 0
-        start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=depth)
-
-        heading_end = h.end_line
-        heading_lines = lines[start:heading_end]
-
-        natural_sep = _collect_trailing_separator(lines, own_body_end, heading_end)
-        trailing = natural_sep if natural_sep else [""]
-
-        raw_lines = (
-            new_content.rstrip("\n").splitlines() if new_content.rstrip("\n") else []
+        lines = _split_lines(original_text)
+        parsed = _ParsedDocument.from_text(original_text)
+        new_lines = _replaced_lines(lines, parsed, path, new_content, "")
+        new_text = "\n".join(new_lines) + ("\n" if original_text.endswith("\n") else "")
+        return "".join(
+            difflib.unified_diff(
+                original_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(self._path),
+                tofile=str(self._path) + " (patched)",
+            )
         )
-        _strip_separator_from_tail(raw_lines, natural_sep)
-
-        body_lines = [""] + raw_lines if raw_lines else []
-
-        new_section = heading_lines + body_lines + trailing
-        new_lines = lines[:start] + new_section + lines[own_body_end:]
-        new_text = "\n".join(new_lines)
-        if new_text and not new_text.endswith("\n"):
-            new_text += "\n"
-        new_lines_with_endings = new_text.splitlines(keepends=True)
-
-        diff = difflib.unified_diff(
-            original_lines,
-            new_lines_with_endings,
-            fromfile=str(self._path),
-            tofile=str(self._path) + " (patched)",
-        )
-        return "".join(diff)
 
     def delete_section(self, path: str, *, include_children: bool = True) -> None:
         """Delete a section from the document and write to file.
@@ -948,11 +1236,13 @@ class MarkdownDocument:
         With ``include_children=False``: delete the heading + its own body
         only; child sections are promoted (their headings remain in place).
         Consecutive blank lines at the deletion point are collapsed to a
-        single blank line.
+        single blank line; nothing else in the file is touched.
         Raises ``KeyError`` if the path does not resolve.
         """
-        lines = self._read_lines()
+        lines, ends_nl, last_cr = self._load()
         parsed = _ParsedDocument.from_text("\n".join(lines))
+        if parsed.frontmatter is not None and _is_frontmatter_path(path):
+            raise ValueError("delete_section cannot target the frontmatter block.")
         idx = _resolve_path(parsed.headings, path)
 
         start, end = _section_lines(
@@ -964,11 +1254,152 @@ class MarkdownDocument:
         # the parent heading + its direct body.
         del lines[start:end]
 
-        # Deduplicate consecutive blank lines at the deletion site
-        i = max(0, start - 1)
-        while i + 1 < len(lines):
-            if lines[i].strip() == "" and lines[i + 1].strip() == "":
-                del lines[i]
-            else:
-                i += 1
-        self._write_lines(lines)
+        # Collapse the run of blank lines now meeting at the deletion site.
+        lo = start
+        while lo > 0 and lines[lo - 1].strip() == "":
+            lo -= 1
+        hi = start
+        while hi < len(lines) and lines[hi].strip() == "":
+            hi += 1
+        if hi == len(lines):
+            del lines[lo:hi]  # the deleted section ended the file
+        elif hi - lo > 1:
+            del lines[lo + 1 : hi]
+        self._write_lines(lines, ends_nl, last_cr)
+
+
+def _replaced_lines(
+    lines: list[str],
+    parsed: _ParsedDocument,
+    path: str,
+    new_content: str,
+    cr: str,
+) -> list[str]:
+    """Return *lines* with the body of section *path* replaced (no I/O)."""
+    if parsed.frontmatter is not None and _is_frontmatter_path(path):
+        return _replace_frontmatter(lines, parsed.frontmatter, new_content, cr)
+    new_content = _strip_leading_heading(new_content.replace("\r\n", "\n"))
+    idx = _resolve_path(parsed.headings, path)
+    h = parsed.headings[idx]
+
+    # If new_content contains child headings, the agent is supplying a full
+    # section replacement (heading + body + children).  Use depth=None so
+    # the entire existing span (including children) is replaced atomically.
+    # Otherwise use depth=0 to touch only the own body and leave children intact.
+    depth: int | None = None if _new_content_has_child_headings(new_content) else 0
+    start, own_body_end = _section_lines(parsed.headings, idx, lines, depth=depth)
+
+    heading_end = h.end_line  # exclusive, 0-indexed; body begins here
+    heading_lines = lines[start:heading_end]
+
+    # Collect the separator: blank lines and HTML comment blocks that sit
+    # between this section's content and the next heading.  These are
+    # preserved verbatim so markers like <!-- BEGIN_TF_DOCS --> survive.
+    natural_sep = _collect_trailing_separator(lines, own_body_end, heading_end)
+    if natural_sep:
+        trailing = natural_sep
+    elif own_body_end >= len(lines):
+        trailing = []  # end of file: nothing follows, no separator needed
+    else:
+        trailing = [cr]
+
+    # Strip separator lines from the tail of new_content to prevent
+    # duplication when the agent passes back content it read via get_section.
+    stripped = new_content.rstrip("\n")
+    raw_lines = stripped.split("\n") if stripped else []
+    _strip_separator_from_tail(raw_lines, natural_sep)
+
+    body_lines = [cr] + _nl(raw_lines, cr) if raw_lines else []
+    return lines[:start] + heading_lines + body_lines + trailing + lines[own_body_end:]
+
+
+SEARCH_MAX_FILE_BYTES = 1024 * 1024
+SEARCH_MAX_TEXT_CHARS = 300
+SEARCH_MAX_LIMIT = 1000
+
+
+def search_files(
+    directory: str | Path,
+    glob: str,
+    query: str,
+    *,
+    scope: str = "body",
+    case_sensitive: bool = False,
+    limit: int = 100,
+    max_file_bytes: int = SEARCH_MAX_FILE_BYTES,
+) -> dict[str, Any]:
+    """Run ``search_sections`` over every file under *directory* matching *glob*.
+
+    Returns ``{"matches": [{"file_path", "path", "line", "text"}, ...],
+    "skipped": int, "truncated": bool, "limit": int}``.
+
+    Files that cannot be read, are not valid UTF-8, are larger than
+    *max_file_bytes* (default 1 MiB), or resolve outside *directory* (symlink
+    escape) are skipped and counted in ``skipped``.  Each match ``text`` is
+    cut to ``SEARCH_MAX_TEXT_CHARS`` characters.
+    Matches are ordered by file path, then file order; at most *limit* are
+    returned and ``truncated`` is true when more existed (``skipped`` is then
+    only a lower bound).
+    Raises ``ValueError`` (bad scope/limit/glob/directory; *limit* must be
+    1..``SEARCH_MAX_LIMIT``; *glob* must be relative and contain no ``..``)
+    or ``re.error``.
+    """
+    if not 1 <= limit <= SEARCH_MAX_LIMIT:
+        raise ValueError(f"limit must be between 1 and {SEARCH_MAX_LIMIT}")
+    if max_file_bytes < 1:
+        raise ValueError("max_file_bytes must be >= 1")
+    if Path(glob).is_absolute() or ".." in Path(glob).parts or glob.startswith("~"):
+        raise ValueError(
+            f"invalid glob {glob!r}: must be relative to directory and contain no '..'"
+        )
+    if scope not in _SCOPES:
+        raise ValueError(f"scope must be one of {sorted(_SCOPES)}; got {scope!r}")
+    re.compile(query)  # fail fast on an invalid regex
+    root = Path(directory).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"not a directory: {directory}")
+    try:
+        candidates = sorted(p for p in root.glob(glob) if p.is_file())
+    except (NotImplementedError, ValueError) as e:
+        raise ValueError(f"invalid glob {glob!r}: {e}") from e
+
+    matches: list[dict[str, Any]] = []
+    skipped = 0
+    truncated = False
+    for file in candidates:
+        if not file.resolve().is_relative_to(root):
+            skipped += 1
+            continue
+        try:
+            if file.stat().st_size > max_file_bytes:
+                skipped += 1
+                continue
+            found = MarkdownDocument(file).search_sections(
+                query, case_sensitive=case_sensitive, scope=scope
+            )
+        except (OSError, UnicodeError):
+            skipped += 1
+            continue
+        for section in found:
+            for m in section["matches"]:
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+                matches.append(
+                    {
+                        "file_path": str(file),
+                        "path": section["path"],
+                        "line": m["line"],
+                        "text": m["text"][:SEARCH_MAX_TEXT_CHARS],
+                    }
+                )
+            if truncated:
+                break
+        if truncated:
+            break
+    return {
+        "matches": matches,
+        "skipped": skipped,
+        "truncated": truncated,
+        "limit": limit,
+    }

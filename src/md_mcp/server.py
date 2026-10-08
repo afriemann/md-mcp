@@ -13,7 +13,7 @@ from typing import Any
 import anyio
 from mcp.server.mcpserver.server import MCPServer
 
-from md_mcp.document import MarkdownDocument
+from md_mcp.document import MarkdownDocument, search_files as _search_files
 
 mcp = MCPServer("md-mcp")
 
@@ -46,9 +46,10 @@ def _check_path(file_path: str) -> Path:
 
 @mcp.tool()
 def get_index(file_path: str) -> dict[str, Any]:
-    """Call this first to discover the section structure of a Markdown file and obtain valid `path` values required by all other tools (get_section, search_sections, add_section, replace_section, patch_section, delete_section).
+    """Call this first to discover the section structure of a Markdown file and obtain valid `path` values required by all other tools (get_section, search_sections, search_files, add_section, replace_section, replace_in_section, patch_section, delete_section).
 
     Returns a nested tree: {"heading": str, "level": int, "path": str, "children": [...]}.
+    If the file starts with a `---` YAML frontmatter block, the first node is {"heading": "frontmatter", "level": 0, "path": "frontmatter", "children": []}; it is never treated as a heading, and the body after it is indexed normally. `path="frontmatter"` is reserved for that block and shadows a top-level heading literally named "frontmatter".
     `path` is the dot-separated section address used by every other tool in this server.
     Literal dots in heading text are escaped as \\. in path strings.
     """
@@ -66,6 +67,7 @@ def get_section(
 
     `path` is a dot-separated heading path, e.g. "My README.Installation.Prerequisites".
     Matching is case-insensitive. Returns the raw Markdown text of the section.
+    `path="frontmatter"` returns the raw YAML text between the `---` delimiters (delimiters excluded); `depth` is ignored for it.
 
     `depth` controls how many levels of child sections are included:
       - None (default): return the section and all descendants
@@ -85,23 +87,56 @@ def search_sections(
     file_path: str,
     query: str,
     case_sensitive: bool = False,
+    scope: str = "body",
 ) -> list[dict[str, Any]]:
-    """Use to find sections whose body contains a regex pattern. Returns one result object per matching section, with line numbers and matched text.
+    """Use to find sections by a regex pattern in their body text, their heading text, or both. Returns one result object per matching section, with line numbers and matched text.
 
-    NOTE: heading text is NOT searched — only section bodies. To find a section by heading,
-    call get_index and scan the returned paths instead.
+    `scope`: "body" (default) matches section body lines only; "headings" matches heading text only; "both" matches either. For a heading match, "line" is the heading's line and "text" is the heading text (without the # markers).
+    Frontmatter lines are searched as the section "frontmatter" when scope is "body" or "both".
 
     `query`: Python regex. `case_sensitive` defaults to False (case-insensitive).
 
     Each result: {"path": "Root.Child", "matches": [{"line": 12, "text": "..."}]}.
-    The "path" in each result is a valid input for get_section, replace_section, patch_section, and delete_section.
+    The "path" in each result is a valid input for get_section, replace_section, replace_in_section, patch_section, and delete_section.
     `line` is the 1-based line number within the file.
-    Only each section's own body is searched (not its children), so results
-    are never duplicated across parent and child sections.
-    Raises an error string if the pattern is invalid.
+    Only each section's own body is searched (not its children), so
+    results are never duplicated across parent and child sections.
+    Raises an error string if the pattern or scope is invalid.
     """
     doc = MarkdownDocument(str(_check_path(file_path)))
-    return doc.search_sections(query, case_sensitive=case_sensitive)
+    return doc.search_sections(query, case_sensitive=case_sensitive, scope=scope)
+
+
+@mcp.tool()
+def search_files(
+    directory: str,
+    glob: str,
+    query: str,
+    scope: str = "body",
+    case_sensitive: bool = False,
+    limit: int = 100,
+    max_file_bytes: int = 1048576,
+) -> dict[str, Any]:
+    """Use to find a phrase across many Markdown files at once (e.g. all agent or skill definitions) instead of calling search_sections per file.
+
+    `directory`: base directory. `glob`: pattern relative to it, e.g. "*.md" or "**/SKILL.md".
+    `query`, `scope`, `case_sensitive`: same meaning as in search_sections ("body" default, "headings", "both").
+    Returns {"matches": [{"file_path", "path", "line", "text"}], "skipped": int, "truncated": bool, "limit": int}.
+    `file_path` + `path` is a valid address for get_section / replace_in_section.
+    `glob` must be relative and contain no "..". Unreadable, non-UTF-8, oversized (> `max_file_bytes`, default 1 MiB) and symlink-escaping files are skipped, not fatal; `skipped` counts them.
+    At most `limit` matches are returned (default 100, maximum 1000); `truncated` is true when more exist — narrow the query or glob. Each match `text` is cut to 300 characters; use get_section for the full text.
+    Raises an error on failure.
+    """
+    base = _check_path(directory)
+    return _search_files(
+        base,
+        glob,
+        query,
+        scope=scope,
+        case_sensitive=case_sensitive,
+        limit=limit,
+        max_file_bytes=max_file_bytes,
+    )
 
 
 @mcp.tool()
@@ -140,11 +175,33 @@ def replace_section(file_path: str, path: str, new_content: str) -> str:
 
     `path`: dot-separated section address obtained from get_index (e.g. "README.Installation").
     `new_content`: replacement body text — do NOT include the heading line.
+    `path="frontmatter"` replaces the YAML between the `---` delimiters (delimiters are kept); the result must be a valid YAML mapping or an error is returned and the file is unchanged (`{{ ... }}` template actions count as scalar values).
+    Bytes outside the replaced section (line endings, trailing blank lines, a missing final newline) are preserved.
+    To change a few words, prefer replace_in_section — it avoids resending the whole body.
     Returns "ok" on success.
     """
     doc = MarkdownDocument(str(_check_path(file_path)))
     doc.replace_section(path, new_content)
     return "ok"
+
+
+@mcp.tool()
+def replace_in_section(
+    file_path: str,
+    path: str,
+    old: str,
+    new: str,
+    replace_all: bool = False,
+) -> str:
+    """Use for a small exact-text edit inside one section without resending its whole body (e.g. change one line of a description). Prefer this over replace_section when only part of the body changes.
+
+    Replaces the exact string `old` with `new` within the body of the section at `path` (the heading line and child sections are not touched). `path="frontmatter"` edits the YAML frontmatter; the result must be a valid YAML mapping. Multi-line `old`/`new` may use "\n" even for CRLF files.
+    `old` must occur exactly once unless `replace_all=true`: no match, or several matches without replace_all, is an error stating why, and nothing is written. `old` equal to `new` is an error.
+    Everything outside the replaced text stays byte-identical (no whitespace, line-ending or trailing-newline changes), so it is safe on files with template syntax such as `{{ ... }}`.
+    Returns the unified diff of the change.
+    """
+    doc = MarkdownDocument(str(_check_path(file_path)))
+    return doc.replace_in_section(path, old, new, replace_all=replace_all)
 
 
 @mcp.tool()
@@ -170,7 +227,7 @@ def delete_section(
 
     Call get_index first to obtain a valid `path`.
 
-    `path`: dot-separated section address from get_index.
+    `path`: dot-separated section address from get_index. `path="frontmatter"` is rejected.
     `include_children=True` (default): deletes the heading, its body, and all child sections.
     `include_children=False`: deletes only the heading and its own body; child sections are promoted to the parent level.
     Returns "ok" on success.

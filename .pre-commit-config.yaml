@@ -13,3 +13,5 @@ repos:
         additional_dependencies:
           - "mistletoe==1.5.1"
           - "mcp>=1.27.2,<2"
+          - "pyyaml>=6,<7"
+          - "types-PyYAML"
