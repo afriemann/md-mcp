@@ -104,6 +104,8 @@ same section. Ambiguous paths (duplicate heading texts at the same level) resolv
 | `patch_section` | `file_path: str`, `path: str`, `new_content: str` | `str` | Returns a unified diff of what `replace_section` would write (including for `path="frontmatter"`), without modifying the file. Returns an empty string if there are no changes. |
 | `delete_section` | `file_path: str`, `path: str`, `include_children: bool = True` | `str` | Deletes the named section. With `include_children=True` (default) removes the heading, its body, and all child sections; with `False` removes only the heading and its direct body, promoting children. `path="frontmatter"` is rejected. Returns `"ok"`. |
 
+**File paths.** Pass `file_path` (and `directory`) as an absolute path, e.g. `/path/to/repo/docs/guide.md`. A relative path resolves against the md-mcp server process's working directory, not the MCP client's workspace, so `repo/docs/guide.md` becomes `<server cwd>/repo/docs/guide.md` and fails when the server already runs in `repo`. A leading `~` expands to the home directory. `--allow-root` only restricts which resolved paths are accepted; it is not a base directory.
+
 ## Frontmatter
 
 A file has frontmatter when its first line is exactly `---`, a later line is exactly `---`, **and** the lines between

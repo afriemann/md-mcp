@@ -52,6 +52,8 @@ def get_index(file_path: str) -> dict[str, Any]:
     If the file starts with a `---` YAML frontmatter block, the first node is {"heading": "frontmatter", "level": 0, "path": "frontmatter", "children": []}; it is never treated as a heading, and the body after it is indexed normally. `path="frontmatter"` is reserved for that block and shadows a top-level heading literally named "frontmatter".
     `path` is the dot-separated section address used by every other tool in this server.
     Literal dots in heading text are escaped as \\. in path strings.
+
+    `file_path` (every tool's file argument, and `directory` in search_files): pass an absolute path, e.g. "/path/to/repo/docs/guide.md". A relative path resolves against the md-mcp server process's working directory, not your session workspace, so a path copied relative to your project root can point to the wrong or a non-existent file (e.g. "repo/docs/guide.md" becomes ".../repo/repo/docs/guide.md" when the server already runs in "repo"). A leading `~` expands to the home directory. `--allow-root` only restricts which resolved paths are accepted; it is not a base directory.
     """
     doc = MarkdownDocument(str(_check_path(file_path)))
     return doc.get_index()
@@ -119,7 +121,7 @@ def search_files(
 ) -> dict[str, Any]:
     """Use to find a phrase across many Markdown files at once (e.g. all agent or skill definitions) instead of calling search_sections per file.
 
-    `directory`: base directory. `glob`: pattern relative to it, e.g. "*.md" or "**/SKILL.md".
+    `directory`: base directory; pass an absolute path (a relative one resolves against the server process's working directory, see get_index). `glob`: pattern relative to it, e.g. "*.md" or "**/SKILL.md".
     `query`, `scope`, `case_sensitive`: same meaning as in search_sections ("body" default, "headings", "both").
     Returns {"matches": [{"file_path", "path", "line", "text"}], "skipped": int, "truncated": bool, "limit": int}.
     `file_path` + `path` is a valid address for get_section / replace_in_section.
