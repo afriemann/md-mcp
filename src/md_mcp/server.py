@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import os
 import signal
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import anyio
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.server import MCPServer
 
 from md_mcp.document import MarkdownDocument, search_files as _search_files
@@ -43,8 +45,31 @@ def _check_path(file_path: str) -> Path:
 # Tools
 # ---------------------------------------------------------------------------
 
+_F = TypeVar("_F", bound=Callable[..., Any])
 
-@mcp.tool()
+
+def _tool(fn: _F) -> _F:
+    """Register *fn* as an MCP tool, surfacing exceptions to the client.
+
+    MCPServer replaces the message of any exception other than ``ToolError``
+    with a generic one, so domain exceptions are re-raised as ``ToolError``
+    carrying their original message.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+
+    mcp.tool()(wrapper)
+    return fn
+
+
+@_tool
 def get_index(file_path: str) -> dict[str, Any]:
     """Call this first to discover the section structure of a Markdown file and obtain valid `path` values required by all other tools (get_section, search_sections, search_files, add_section, replace_section, replace_in_section, patch_section, delete_section).
 
@@ -59,7 +84,7 @@ def get_index(file_path: str) -> dict[str, Any]:
     return doc.get_index()
 
 
-@mcp.tool()
+@_tool
 def get_section(
     file_path: str,
     path: str,
@@ -84,7 +109,7 @@ def get_section(
     return doc.get_section(path, depth=depth)
 
 
-@mcp.tool()
+@_tool
 def search_sections(
     file_path: str,
     query: str,
@@ -109,7 +134,7 @@ def search_sections(
     return doc.search_sections(query, case_sensitive=case_sensitive, scope=scope)
 
 
-@mcp.tool()
+@_tool
 def search_files(
     directory: str,
     glob: str,
@@ -141,7 +166,7 @@ def search_files(
     )
 
 
-@mcp.tool()
+@_tool
 def add_section(
     file_path: str,
     heading: str,
@@ -169,7 +194,7 @@ def add_section(
     return "ok"
 
 
-@mcp.tool()
+@_tool
 def replace_section(file_path: str, path: str, new_content: str) -> str:
     """Use to update the body of an existing section without touching its heading. Prefer this over a generic file-write tool when the Markdown file has section structure.
 
@@ -187,7 +212,7 @@ def replace_section(file_path: str, path: str, new_content: str) -> str:
     return "ok"
 
 
-@mcp.tool()
+@_tool
 def replace_in_section(
     file_path: str,
     path: str,
@@ -206,7 +231,7 @@ def replace_in_section(
     return doc.replace_in_section(path, old, new, replace_all=replace_all)
 
 
-@mcp.tool()
+@_tool
 def patch_section(file_path: str, path: str, new_content: str) -> str:
     """Dry-run preview of replace_section — returns a unified diff without writing to the file. Call this before replace_section to confirm the change is correct.
 
@@ -219,7 +244,7 @@ def patch_section(file_path: str, path: str, new_content: str) -> str:
     return doc.patch_section(path, new_content)
 
 
-@mcp.tool()
+@_tool
 def delete_section(
     file_path: str,
     path: str,
